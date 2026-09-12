@@ -1,25 +1,10 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-
-# Virtual environments
+*.egg-info/
 .venv/
 venv/
-env/
-
-# Environment variables
 .env
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Build artifacts
-build/
-dist/
-*.egg-info/
 
 # IDE
 .vscode/
@@ -27,7 +12,8 @@ dist/
 
 # OS
 .DS_Store
-Thumbs.db
 
-# Logs
-*.log
+# Project-specific (added in later phases)
+*.db
+.streamlit/secrets.toml
+models/checkpoints/

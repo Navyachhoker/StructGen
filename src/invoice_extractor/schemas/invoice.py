@@ -15,7 +15,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 
 class LineItem(BaseModel):
@@ -33,6 +33,15 @@ class LineItem(BaseModel):
         if v is not None and v < 0:
             raise ValueError("Monetary values must be non-negative")
         return v
+
+    @field_serializer("unit_price", "total")
+    def serialize_decimal(self, value: Optional[Decimal]) -> Optional[str]:
+        """
+        Round-trips Decimal <-> JSON-string cleanly, which matters once this
+        gets serialized for Postgres storage (Phase 5). Replaces the
+        deprecated `json_encoders` Config option from Pydantic V1 style.
+        """
+        return str(value) if value is not None else None
 
 
 class ExtractedInvoice(BaseModel):
@@ -67,7 +76,13 @@ class ExtractedInvoice(BaseModel):
             raise ValueError("Monetary values must be non-negative")
         return v
 
-    class Config:
-        # Allows Decimal <-> JSON-string round-tripping cleanly,
-        # which matters once this gets serialized for Postgres storage (Phase 5).
-        json_encoders = {Decimal: str}
+    model_config = ConfigDict()
+
+    @field_serializer("subtotal", "tax_amount", "total_amount")
+    def serialize_decimal(self, value: Optional[Decimal]) -> Optional[str]:
+        """
+        Round-trips Decimal <-> JSON-string cleanly, which matters once this
+        gets serialized for Postgres storage (Phase 5). Replaces the
+        deprecated `json_encoders` Config option from Pydantic V1 style.
+        """
+        return str(value) if value is not None else None
