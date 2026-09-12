@@ -1,0 +1,56 @@
+"""
+Request/response models for the HTTP API layer.
+
+These are deliberately separate from ExtractedInvoice (schemas/invoice.py).
+That schema is the *extraction contract* the model output is judged
+against. These models are the *API contract* — what a client sends/
+receives over HTTP. Conflating the two would make it harder to evolve
+one without breaking the other (e.g., adding a request field like
+`preferred_model` here shouldn't touch the extraction schema at all).
+"""
+
+from typing import Optional
+
+from pydantic import BaseModel
+
+from invoice_extractor.schemas.invoice import ExtractedInvoice
+
+
+class ExtractRequest(BaseModel):
+    """Body for POST /extract."""
+
+    raw_text: str
+
+
+class ExtractResponse(BaseModel):
+    """Body returned by POST /extract."""
+
+    success: bool
+    invoice: Optional[ExtractedInvoice] = None
+    error: Optional[str] = None
+    latency_seconds: Optional[float] = None
+    estimated_cost_usd: Optional[float] = None
+
+
+class StatsResponse(BaseModel):
+    """Body returned by GET /stats."""
+
+    total_requests: int
+    successful_requests: int
+    success_rate: float
+    average_latency_seconds: Optional[float] = None
+    total_estimated_cost_usd: float
+    
+class JobSubmitResponse(BaseModel):
+    """Returned immediately by POST /extract, before any work is done."""
+
+    job_id: str
+    status: str = "queued"
+
+
+class JobStatusResponse(BaseModel):
+    """Returned by GET /jobs/{job_id}. `result` is populated only once status is 'complete'."""
+
+    job_id: str
+    status: str  # "deferred" | "queued" | "in_progress" | "complete" | "not_found"
+    result: Optional[ExtractResponse] = None

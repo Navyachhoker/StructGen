@@ -33,8 +33,20 @@ class FakeModelClient(ModelClient):
 
     def __init__(self, fixed_response: str = DEFAULT_FAKE_RESPONSE):
         self.fixed_response = fixed_response
+        self._last_usage: dict | None = None
 
     def extract_raw(self, prompt: str) -> str:
         # Ignores the prompt entirely — this client's only job is to
         # return whatever canned response the test asked for.
+        # Records fake but realistic usage stats, mirroring what
+        # GroqClient tracks, so callers like worker.py that check
+        # get_last_usage() work identically against real or fake clients.
+        self._last_usage = {
+            "latency_seconds": 0.01,
+            "input_tokens": len(prompt.split()),
+            "estimated_cost_usd": 0.0,
+        }
         return self.fixed_response
+
+    def get_last_usage(self) -> dict | None:
+        return self._last_usage
