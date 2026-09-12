@@ -1,0 +1,19 @@
+[project]
+name = "invoice-extractor"
+version = "0.1.0"
+description = "Benchmarking prompted LLM vs fine-tuned small model for invoice data extraction"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.5.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
