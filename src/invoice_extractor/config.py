@@ -27,8 +27,7 @@ class Settings:
 
     # --- Phase 2+: Groq (baseline model) ---
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
-    groq_model_name: str = "llama-3.3-70b-versatile"
-
+    groq_model_name: str = os.getenv("GROQ_MODEL_NAME", "openai/gpt-oss-120b")
     # --- Phase 4+: Redis / arq queue ---
     redis_url: str = os.getenv("REDIS_URL", "")
 
