@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from invoice_extractor.config import settings
 from invoice_extractor.clients.groq_client import GroqClient
 from invoice_extractor.worker import extract_invoice_task
+from invoice_extractor.db.connection import get_pool
 
 requires_groq_key = pytest.mark.skipif(
     not settings.groq_api_key, reason="GROQ_API_KEY not set — skipping live API test"
@@ -36,20 +37,20 @@ def test_extract_rejects_empty_text(client):
     response = client.post("/extract", json={"raw_text": "   "})
     assert response.status_code == 400
 
+async def _run_with_pool(ctx_extra: dict, raw_text: str) -> dict:
+    pool = await get_pool()
+    ctx = {**ctx_extra, "db_pool": pool}
+    return await extract_invoice_task(ctx, raw_text)
 
 @requires_groq_key
 def test_extract_invoice_task_produces_valid_result_via_live_groq():
-    """Tests the worker's job function directly against the real Groq
-    API, bypassing arq's own event loop entirely — running arq's full
-    worker synchronously inside a test causes event-loop conflicts with
-    TestClient's own async context on Windows. /extract's enqueue
-    behavior is verified separately in test_extract_enqueues_job_and_returns_job_id."""
     from invoice_extractor.data.sample_invoices import ALL_SAMPLES
 
     raw_text, _expected = ALL_SAMPLES[0]
-    ctx = {"groq_client": GroqClient()}
-
-    result = asyncio.run(extract_invoice_task(ctx, raw_text))
+    result = asyncio.run(_run_with_pool(
+        {"groq_client": GroqClient(), "job_id": "test-job-live-001"},
+        raw_text,
+    ))
 
     assert result["success"] is True
     assert result["invoice"]["vendor_name"]

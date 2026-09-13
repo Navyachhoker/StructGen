@@ -11,11 +11,21 @@ import asyncio
 
 from invoice_extractor.worker import extract_invoice_task
 from invoice_extractor.clients.fake import FakeModelClient
+from invoice_extractor.db.connection import get_pool
 
+async def _run_with_pool(ctx_extra: dict, raw_text: str) -> dict:
+    """Runs get_pool() and extract_invoice_task() on the same event loop,
+    avoiding asyncpg's pool-connections-bound-to-loop issue that occurs
+    when they're run via separate asyncio.run() calls."""
+    pool = await get_pool()
+    ctx = {**ctx_extra, "db_pool": pool}
+    return await extract_invoice_task(ctx, raw_text)
 
 def test_extract_invoice_task_returns_json_safe_dict():
-    ctx = {"groq_client": FakeModelClient()}
-    result = asyncio.run(extract_invoice_task(ctx, "some invoice text"))
+    result = asyncio.run(_run_with_pool(
+        {"groq_client": FakeModelClient(), "job_id": "test-job-001"},
+        "some invoice text",
+    ))
 
     assert result["success"] is True
     assert result["invoice"]["vendor_name"] == "Fake Vendor Inc"
@@ -26,8 +36,10 @@ def test_extract_invoice_task_returns_json_safe_dict():
 
 
 def test_extract_invoice_task_handles_failure():
-    ctx = {"groq_client": FakeModelClient(fixed_response="not json")}
-    result = asyncio.run(extract_invoice_task(ctx, "some invoice text"))
+    result = asyncio.run(_run_with_pool(
+        {"groq_client": FakeModelClient(fixed_response="not json"), "job_id": "test-job-002"},
+        "some invoice text",
+    ))
 
     assert result["success"] is False
     assert result["invoice"] is None

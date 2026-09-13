@@ -1,9 +1,6 @@
 """
-FastAPI application - async version.
-
-POST /extract now enqueues a job and returns immediately with a job ID.
-GET /jobs/{job_id} polls for the result. The actual Groq call happens in
-a separate arq worker process (worker.py), not in this API process.
+FastAPI application. /stats now reads from Postgres instead of the
+deleted in-memory store (api/store.py is gone as of this phase).
 """
 
 from contextlib import asynccontextmanager
@@ -20,11 +17,10 @@ from invoice_extractor.api.models import (
     JobStatusResponse,
     StatsResponse,
 )
-from invoice_extractor.api.store import store, RequestLog
 from invoice_extractor.config import settings
+from invoice_extractor.db.connection import get_pool, close_pool
+from invoice_extractor.db.repository import get_stats
 
-# Redis connection pool used to enqueue jobs and check their status.
-# Created once at app startup via the lifespan context, not per-request.
 _redis_pool = None
 
 
@@ -32,14 +28,16 @@ _redis_pool = None
 async def lifespan(app: FastAPI):
     global _redis_pool
     _redis_pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    await get_pool()  # establishes the Postgres pool for this process
     yield
     await _redis_pool.close()
+    await close_pool()
 
 
 app = FastAPI(
     title="Invoice Extractor API",
     description="Extracts structured JSON from invoice/receipt text using LLMs.",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -51,8 +49,6 @@ def health_check():
 
 @app.post("/extract", response_model=JobSubmitResponse)
 async def extract(request: ExtractRequest):
-    """Enqueues an extraction job and returns instantly with a job ID.
-    Poll GET /jobs/{job_id} for the actual result."""
     if not request.raw_text.strip():
         raise HTTPException(status_code=400, detail="raw_text must not be empty")
 
@@ -62,7 +58,9 @@ async def extract(request: ExtractRequest):
 
 @app.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def job_status(job_id: str):
-    """Checks a job's status. Keep polling until status is 'complete'."""
+    """Unchanged from Phase 4 — still reads the immediate result from arq.
+    The permanent Postgres record is now written independently by the
+    worker, so this endpoint no longer needs to log anything itself."""
     job = Job(job_id, _redis_pool)
     status = await job.status()
 
@@ -73,29 +71,16 @@ async def job_status(job_id: str):
         return JobStatusResponse(job_id=job_id, status=status.value)
 
     job_result = await job.result_info()
-    result_dict = job_result.result
-
-    # See store.py: add_once prevents double-counting if this job gets polled
-    # again after completion. NOTE: this only updates stats for jobs someone
-    # actually polls to completion through this API process - Phase 5's
-    # Postgres table (written by the worker directly) fixes that gap for good.
-    store.add_once(
-        job_id,
-        RequestLog(
-            success=result_dict["success"],
-            latency_seconds=result_dict["latency_seconds"],
-            estimated_cost_usd=result_dict["estimated_cost_usd"],
-        ),
-    )
-
     return JobStatusResponse(
         job_id=job_id,
         status="complete",
-        result=ExtractResponse(**result_dict),
+        result=ExtractResponse(**job_result.result),
     )
 
 
 @app.get("/stats", response_model=StatsResponse)
-def stats():
-    """See the caveat in job_status() above regarding when this updates."""
-    return StatsResponse(**store.compute_stats())
+async def stats():
+    """Now sourced from Postgres — correct across restarts, multiple
+    processes, and jobs nobody ever polled."""
+    pool = await get_pool()
+    return StatsResponse(**(await get_stats(pool)))
