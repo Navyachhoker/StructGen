@@ -13,11 +13,17 @@ dependencies = [
     "asyncpg>=0.29.0",       # NEW: async Postgres driver
 ]
 
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "httpx>=0.27.0",        # required by FastAPI's TestClient
+]
+
+demo = [
+    "streamlit>=1.38.0",   # NEW — isolated in its own extra, not core deps
+    "requests>=2.32.0",    # NEW
 ]
 
 [tool.pytest.ini_options]
