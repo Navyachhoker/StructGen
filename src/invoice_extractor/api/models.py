@@ -10,7 +10,7 @@ one without breaking the other (e.g., adding a request field like
 """
 
 from typing import Optional
-
+from datetime import datetime
 from pydantic import BaseModel
 
 from invoice_extractor.schemas.invoice import ExtractedInvoice
@@ -54,3 +54,18 @@ class JobStatusResponse(BaseModel):
     job_id: str
     status: str  # "deferred" | "queued" | "in_progress" | "complete" | "not_found"
     result: Optional[ExtractResponse] = None
+    
+    
+    
+class InvoiceListItem(BaseModel):
+    job_id: str
+    model_name: str
+    success: bool
+    error: Optional[str] = None
+    vendor_name: Optional[str] = None
+    invoice_number: Optional[str] = None
+    invoice_date: Optional[str] = None
+    total_amount: Optional[str] = None
+    latency_seconds: float
+    estimated_cost_usd: float
+    created_at: datetime

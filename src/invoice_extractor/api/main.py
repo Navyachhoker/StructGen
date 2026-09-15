@@ -20,11 +20,12 @@ from invoice_extractor.api.models import (
     JobSubmitResponse,
     JobStatusResponse,
     StatsResponse,
+    InvoiceListItem,
 )
 from invoice_extractor.config import settings
 from invoice_extractor.clients.groq_client import GroqClient
 from invoice_extractor.db.connection import get_pool, close_pool
-from invoice_extractor.db.repository import get_stats
+from invoice_extractor.db.repository import get_stats, list_recent_extractions
 from invoice_extractor.worker import extract_invoice_task
 
 _redis_pool = None
@@ -125,3 +126,10 @@ async def job_status(job_id: str):
 async def stats():
     pool = await get_pool()
     return StatsResponse(**(await get_stats(pool)))
+
+
+@app.get("/invoices", response_model=list[InvoiceListItem])
+async def list_invoices(limit: int = 20):
+    """Recent extraction records for the dashboard's invoice table."""
+    pool = await get_pool()
+    return await list_recent_extractions(pool, limit)

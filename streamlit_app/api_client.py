@@ -8,6 +8,7 @@ schema validation, no model calls happen here — that would duplicate
 work the API already does correctly.
 """
 
+import os
 import time
 from typing import Optional
 
@@ -16,7 +17,7 @@ import requests
 # In production this would point at your deployed Render URL instead of
 # localhost — kept as a plain constant here since Streamlit's own secrets
 # manager (Phase 6 deploy step) is the right place for that, not code.
-API_BASE_URL = "http://127.0.0.1:8000"
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
 # How long to keep polling before giving up — LLM calls are usually fast,
 # but free-tier cold starts (Render spinning up) can take a while.
@@ -57,6 +58,18 @@ def get_stats() -> Optional[dict]:
     so the UI can show a friendly message instead of crashing."""
     try:
         response = requests.get(f"{API_BASE_URL}/stats", timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException:
+        return None
+    
+    
+    
+def get_recent_invoices(limit: int = 20) -> Optional[list]:
+    """Fetches recent extraction records for the dashboard table. Returns
+    None if the API is unreachable, same pattern as get_stats."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/invoices", params={"limit": limit}, timeout=5)
         response.raise_for_status()
         return response.json()
     except requests.RequestException:

@@ -73,3 +73,33 @@ async def get_stats(pool: asyncpg.Pool) -> dict:
         "average_latency_seconds": round(row["average_latency_seconds"], 3) if row["average_latency_seconds"] else None,
         "total_estimated_cost_usd": round(float(row["total_estimated_cost_usd"]), 6),
     }
+    
+async def list_recent_extractions(pool: asyncpg.Pool, limit: int = 20) -> list[dict]:
+    """
+    Recent extraction records for the dashboard's invoice list. Pulls
+    display fields out of invoice_json since the table stores the full
+    extracted invoice as JSONB, not as separate columns (see schema.sql).
+    Rows where extraction failed still show up, with these fields NULL —
+    the dashboard needs to show failures alongside successes.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT
+            job_id,
+            model_name,
+            success,
+            error,
+            invoice_json ->> 'vendor_name'    AS vendor_name,
+            invoice_json ->> 'invoice_number' AS invoice_number,
+            invoice_json ->> 'invoice_date'   AS invoice_date,
+            invoice_json ->> 'total_amount'   AS total_amount,
+            latency_seconds,
+            estimated_cost_usd,
+            created_at
+        FROM extraction_requests
+        ORDER BY created_at DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [dict(r) for r in rows]
