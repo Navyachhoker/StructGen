@@ -17,3 +17,6 @@ venv/
 *.db
 .streamlit/secrets.toml
 models/checkpoints/
+
+#data
+data/synthetic/
