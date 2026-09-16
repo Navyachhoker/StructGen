@@ -37,7 +37,19 @@ class Settings:
     # --- General ---
     # Used later for validation retry logic (Phase 1+)
     schema_validation_max_retries: int = 1
+    
+    # --- Phase 6: Ollama / local fine-tuned model ---
+    ollama_host: str = os.getenv(
+        "OLLAMA_HOST",
+        "http://localhost:11434",
+    )
+    ollama_model_name: str = os.getenv(
+        "OLLAMA_MODEL_NAME",
+        "qwen-invoice-lora",
+    )
 
 
 # Single shared instance — import this, don't instantiate Settings() elsewhere.
 settings = Settings()
+
+

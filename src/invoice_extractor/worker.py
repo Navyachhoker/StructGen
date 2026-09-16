@@ -13,7 +13,7 @@ from invoice_extractor.db.repository import insert_extraction_record
 
 # Identifies which model produced a given record — see schema.sql comment
 # for why this column exists ahead of Phase 7's second model.
-_MODEL_NAME = "groq-llama-3.3-70b"
+_MODEL_NAME = "openai/gpt-oss-120b"
 
 
 async def startup(ctx: dict) -> None:

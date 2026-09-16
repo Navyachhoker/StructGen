@@ -2,8 +2,14 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.pytest_cache/
+
+# Virtual environments
 .venv/
+.venv-ml/
 venv/
+
+# Environment variables
 .env
 
 # IDE
@@ -13,10 +19,12 @@ venv/
 # OS
 .DS_Store
 
-# Project-specific (added in later phases)
+# Project-specific
 *.db
 .streamlit/secrets.toml
 models/checkpoints/
 
-#data
+# Local / generated data
 data/synthetic/
+data/real_holdout/
+content/
