@@ -1,684 +1,362 @@
+"""
+Fine-tune Qwen2.5-1.5B-Instruct with LoRA for invoice/receipt extraction.
+
+Final v3 training configuration used for the portfolio benchmark.
+
+Designed to run on a Google Colab T4 GPU.
+This script is NOT intended for CPU-only training.
+
+Expected compact dataset format:
+    {
+        "prompt": "...",
+        "completion": "..."
+    }
+
+Example:
+    python scripts/finetune_lora.py \
+        --data train_compact.jsonl \
+        --output_dir qwen-invoice-lora-v3
+
+Final v3 configuration:
+    - Base model: Qwen/Qwen2.5-1.5B-Instruct
+    - LoRA rank: 16
+    - LoRA alpha: 32
+    - LoRA dropout: 0.05
+    - Target modules: q_proj, k_proj, v_proj, o_proj
+    - Maximum sequence length: 512
+    - Batch size: 1
+    - Gradient accumulation: 8
+    - Learning rate: 2e-4
+    - Gradient checkpointing: enabled
+    - FP16: enabled
+    - Validation split: 90/10, seed 42
+    - Save strategy: every epoch
+    - Save total limit: 2
+    - Save only model: enabled
+
+The script saves a LoRA adapter, not a merged full model.
+"""
+
+import argparse
 import json
-import re
-from pathlib import Path
-from difflib import SequenceMatcher
-from collections import Counter
 
 
-# ============================================================
-# Files
-# ============================================================
-
-RESULT_FILES = {
-    "Groq — Synthetic": "/content/groq_synthetic_results.json",
-    "Groq — Real": "/content/groq_real_results.json",
-    "LoRA Qwen v3 — Real": "/content/lora_v3_synthetic_results.json",
-    "Base Qwen — Real": "/content/base_qwen_real_results.json",
-}
+from datasets import Dataset
+from peft import LoraConfig, get_peft_model
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+)
 
 
-DOC_FIELDS = [
-    "vendor_name",
-    "invoice_number",
-    "invoice_date",
-    "subtotal",
-    "tax_amount",
-    "total_amount",
-    "currency",
-]
+BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
-ITEM_FIELDS = [
-    "description",
-    "quantity",
-    "unit_price",
-    "total",
-]
+MAX_LENGTH = 512
+VALIDATION_RATIO = 0.10
+RANDOM_SEED = 42
 
 
-# ============================================================
-# Normalization
-# ============================================================
+def load_dataset(path: str) -> Dataset:
+    """
+    Load the compact JSONL training dataset.
 
-def normalize_text(value):
-    if value is None:
-        return None
+    Each row contains:
+        {
+            "prompt": "...",
+            "completion": "..."
+        }
+    """
 
-    text = str(value).lower().strip()
-    text = re.sub(r"\s+", " ", text)
+    examples = []
 
-    text = text.replace("–", "-").replace("—", "-")
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            row = json.loads(line)
 
-    text = re.sub(
-        r"\s*([,/+#*@().-])\s*",
-        r"\1",
-        text
+            examples.append(
+                {
+                    "prompt": row["prompt"],
+                    "completion": row["completion"],
+                }
+            )
+
+    return Dataset.from_list(examples)
+
+
+def build_prompt(prompt: str) -> str:
+    """
+    Build the exact prompt format used during v3 training.
+
+    The completion is kept separate so that the invoice text can be
+    truncated without removing the target JSON.
+    """
+
+    return f"""### Instruction:
+{prompt}
+
+### Response:
+"""
+
+
+def tokenize_and_mask(example, tokenizer):
+    """
+    Tokenize one training example while preserving the completion.
+
+    The important v3 change is that we do NOT simply truncate the entire
+    prompt + completion to MAX_LENGTH.
+
+    Instead:
+        1. Tokenize the prompt and completion separately.
+        2. Reserve space for the completion.
+        3. If necessary, truncate the invoice/prompt portion.
+        4. Keep the complete completion whenever possible.
+        5. Mask prompt tokens with -100 so loss is calculated only on
+           the target JSON completion.
+    """
+
+    prompt_text = build_prompt(example["prompt"])
+    completion_text = example["completion"]
+
+    prompt_tokens = tokenizer(
+        prompt_text,
+        add_special_tokens=False,
+    )["input_ids"]
+
+    completion_tokens = tokenizer(
+        completion_text,
+        add_special_tokens=False,
+    )["input_ids"]
+
+    # Reserve room for the completion.
+    max_prompt_tokens = MAX_LENGTH - len(completion_tokens)
+
+    if max_prompt_tokens < 0:
+        # This should not normally happen with the compact dataset.
+        # If a completion itself is too long, truncate it as a last resort.
+        completion_tokens = completion_tokens[:MAX_LENGTH]
+        prompt_tokens = []
+    else:
+        # Truncate ONLY the prompt/invoice portion.
+        prompt_tokens = prompt_tokens[:max_prompt_tokens]
+
+    input_ids = prompt_tokens + completion_tokens
+
+    # Attention mask for all real tokens.
+    attention_mask = [1] * len(input_ids)
+
+    # Ignore prompt tokens when calculating loss.
+    labels = (
+        [-100] * len(prompt_tokens)
+        + completion_tokens.copy()
     )
 
-    return text
-
-
-def normalize_number(value):
-    if value is None:
-        return None
-
-    try:
-        text = str(value).strip().replace(",", "")
-
-        if text == "":
-            return None
-
-        return float(text)
-
-    except (ValueError, TypeError):
-        return None
-
-
-def normalize_currency(value):
-    if value is None:
-        return None
-
-    value = str(value).strip().upper()
-
-    aliases = {
-        "RM": "MYR",
-        "MYR": "MYR",
-        "RINGGIT": "MYR",
-        "MALAYSIAN RINGGIT": "MYR",
-    }
-
-    return aliases.get(value, value)
-
-
-def numbers_equal(a, b, tolerance=1e-6):
-
-    a_num = normalize_number(a)
-    b_num = normalize_number(b)
-
-    if a_num is None or b_num is None:
-        return a_num is None and b_num is None
-
-    return abs(a_num - b_num) <= tolerance
-
-
-def field_equal(field, gt, pred):
-
-    if field == "description":
-        return normalize_text(gt) == normalize_text(pred)
-
-    if field in {
-        "quantity",
-        "unit_price",
-        "total",
-        "subtotal",
-        "tax_amount",
-    }:
-        return numbers_equal(gt, pred)
-
-    if field == "currency":
-        return normalize_currency(gt) == normalize_currency(pred)
-
-    return gt == pred
-
-
-# ============================================================
-# Line-item matching
-# ============================================================
-
-def description_similarity(a, b):
-
-    a = normalize_text(a)
-    b = normalize_text(b)
-
-    if a is None or b is None:
-        return 0.0
-
-    if a == b:
-        return 1.0
-
-    return SequenceMatcher(None, a, b).ratio()
-
-
-def item_score(gt, pred):
-
-    desc = description_similarity(
-        gt.get("description"),
-        pred.get("description")
-    )
-
-    quantity = numbers_equal(
-        gt.get("quantity"),
-        pred.get("quantity")
-    )
-
-    unit_price = numbers_equal(
-        gt.get("unit_price"),
-        pred.get("unit_price")
-    )
-
-    total = numbers_equal(
-        gt.get("total"),
-        pred.get("total")
-    )
-
-    return (
-        0.55 * desc
-        + 0.15 * quantity
-        + 0.15 * unit_price
-        + 0.15 * total
-    )
-
-
-def items_match(gt, pred):
-
-    desc = description_similarity(
-        gt.get("description"),
-        pred.get("description")
-    )
-
-    quantity = numbers_equal(
-        gt.get("quantity"),
-        pred.get("quantity")
-    )
-
-    unit_price = numbers_equal(
-        gt.get("unit_price"),
-        pred.get("unit_price")
-    )
-
-    total = numbers_equal(
-        gt.get("total"),
-        pred.get("total")
-    )
-
-    if desc == 1.0:
-        return True
-
-    if desc >= 0.90:
-        return True
-
-    if desc >= 0.75 and (total or unit_price):
-        return True
-
-    if desc >= 0.60 and total and (quantity or unit_price):
-        return True
-
-    return False
-
-
-def match_items(gt_items, pred_items):
-
-    remaining = set(range(len(pred_items)))
-
-    matches = []
-    missing = []
-
-    for gt_index, gt_item in enumerate(gt_items):
-
-        candidates = []
-
-        for pred_index in remaining:
-
-            pred_item = pred_items[pred_index]
-
-            if items_match(gt_item, pred_item):
-
-                score = item_score(
-                    gt_item,
-                    pred_item
-                )
-
-                candidates.append(
-                    (score, pred_index)
-                )
-
-        if not candidates:
-            missing.append(gt_index)
-            continue
-
-        candidates.sort(reverse=True)
-
-        _, best_pred_index = candidates[0]
-
-        matches.append(
-            (gt_index, best_pred_index)
-        )
-
-        remaining.remove(best_pred_index)
-
-    extra = sorted(remaining)
-
-    return matches, missing, extra
-
-
-# ============================================================
-# Evaluation
-# ============================================================
-
-def evaluate(file_path):
-
-    data = json.loads(
-        Path(file_path).read_text(
-            encoding="utf-8"
-        )
-    )
-
-    results = data.get("results", [])
-
-    total_examples = len(results)
-
-    valid_json = 0
-
-    doc_correct = Counter()
-    doc_total = Counter()
-
-    item_correct = Counter()
-    item_total = Counter()
-
-    hallucinations = Counter()
-
-    gt_item_count = 0
-    pred_item_count = 0
-    matched_item_count = 0
-    missing_item_count = 0
-    extra_item_count = 0
-
-    complete_items = 0
-
-    example_details = []
-
-    for result in results:
-
-        gt = result.get("ground_truth") or {}
-        pred = result.get("prediction")
-
-        if isinstance(pred, dict):
-            valid_json += 1
-        else:
-            pred = {}
-
-        # ----------------------------------------------------
-        # Document-level fields
-        # ----------------------------------------------------
-
-        for field in DOC_FIELDS:
-
-            gt_value = gt.get(field, None)
-            pred_value = pred.get(field, None)
-
-            doc_total[field] += 1
-
-            if field_equal(
-                field,
-                gt_value,
-                pred_value
-            ):
-                doc_correct[field] += 1
-
-            # Ground truth is missing but model produced value
-            if (
-                gt_value is None
-                and pred_value is not None
-            ):
-                hallucinations[field] += 1
-
-        # ----------------------------------------------------
-        # Line items
-        # ----------------------------------------------------
-
-        gt_items = gt.get("line_items") or []
-        pred_items = pred.get("line_items") or []
-
-        gt_item_count += len(gt_items)
-        pred_item_count += len(pred_items)
-
-        matches, missing, extra = match_items(
-            gt_items,
-            pred_items
-        )
-
-        matched_item_count += len(matches)
-        missing_item_count += len(missing)
-        extra_item_count += len(extra)
-
-        for gt_index, pred_index in matches:
-
-            gt_item = gt_items[gt_index]
-            pred_item = pred_items[pred_index]
-
-            all_fields_match = True
-
-            for field in ITEM_FIELDS:
-
-                gt_value = gt_item.get(field, None)
-                pred_value = pred_item.get(field, None)
-
-                item_total[field] += 1
-
-                if field_equal(
-                    field,
-                    gt_value,
-                    pred_value
-                ):
-                    item_correct[field] += 1
-                else:
-                    all_fields_match = False
-
-                if (
-                    gt_value is None
-                    and pred_value is not None
-                ):
-                    hallucinations[
-                        f"line_item.{field}"
-                    ] += 1
-
-            if all_fields_match:
-                complete_items += 1
-
-        example_details.append({
-            "index": result.get("index"),
-            "gt_items": len(gt_items),
-            "pred_items": len(pred_items),
-            "matched": len(matches),
-            "missing": len(missing),
-            "extra": len(extra),
-            "missing_indices": missing,
-            "extra_indices": extra,
-        })
-
-    # ========================================================
-    # Metrics
-    # ========================================================
-
-    def percentage(correct, total):
-
-        if total == 0:
-            return 0.0
-
-        return (
-            100 * correct / total
-        )
-
-    doc_accuracy = {
-        field: percentage(
-            doc_correct[field],
-            doc_total[field]
-        )
-        for field in DOC_FIELDS
-    }
-
-    total_doc_correct = sum(
-        doc_correct.values()
-    )
-
-    total_doc_fields = sum(
-        doc_total.values()
-    )
-
-    overall_field_accuracy = percentage(
-        total_doc_correct,
-        total_doc_fields
-    )
-
-    item_field_accuracy = {
-        field: percentage(
-            item_correct[field],
-            item_total[field]
-        )
-        for field in ITEM_FIELDS
-    }
-
-    item_recall = percentage(
-        matched_item_count,
-        gt_item_count
-    )
-
-    item_precision = percentage(
-        matched_item_count,
-        pred_item_count
-    )
-
-    complete_item_accuracy = percentage(
-        complete_items,
-        gt_item_count
-    )
+    # Pad to MAX_LENGTH.
+    padding_length = MAX_LENGTH - len(input_ids)
+
+    if padding_length > 0:
+        pad_token_id = tokenizer.pad_token_id
+
+        input_ids += [pad_token_id] * padding_length
+        attention_mask += [0] * padding_length
+        labels += [-100] * padding_length
 
     return {
-        "examples": total_examples,
-
-        "valid_json": valid_json,
-
-        "valid_json_rate": percentage(
-            valid_json,
-            total_examples
-        ),
-
-        "overall_field_accuracy":
-            overall_field_accuracy,
-
-        "doc_correct": dict(doc_correct),
-        "doc_total": dict(doc_total),
-        "doc_accuracy": doc_accuracy,
-
-        "gt_items": gt_item_count,
-        "predicted_items": pred_item_count,
-        "matched_items": matched_item_count,
-        "missing_items": missing_item_count,
-        "extra_items": extra_item_count,
-
-        "item_recall": item_recall,
-        "item_precision": item_precision,
-
-        "item_correct": dict(item_correct),
-        "item_total": dict(item_total),
-        "item_field_accuracy":
-            item_field_accuracy,
-
-        "complete_items": complete_items,
-        "complete_item_accuracy":
-            complete_item_accuracy,
-
-        "hallucinations":
-            dict(hallucinations),
-
-        "example_details":
-            example_details,
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": labels,
     }
 
 
-# ============================================================
-# Run benchmark
-# ============================================================
+def main():
+    parser = argparse.ArgumentParser()
 
-all_metrics = {}
-
-for model_name, file_path in RESULT_FILES.items():
-
-    print("\n" + "=" * 90)
-    print(model_name)
-    print("=" * 90)
-
-    try:
-
-        metrics = evaluate(file_path)
-
-        all_metrics[model_name] = metrics
-
-        print(
-            f"Examples:              "
-            f"{metrics['examples']}"
-        )
-
-        print(
-            f"Valid JSON:            "
-            f"{metrics['valid_json']}/"
-            f"{metrics['examples']} "
-            f"({metrics['valid_json_rate']:.2f}%)"
-        )
-
-        print(
-            f"Overall field accuracy: "
-            f"{metrics['overall_field_accuracy']:.2f}%"
-        )
-
-        print("\nDocument-level fields:")
-
-        for field in DOC_FIELDS:
-
-            correct = metrics[
-                "doc_correct"
-            ][field]
-
-            total = metrics[
-                "doc_total"
-            ][field]
-
-            accuracy = metrics[
-                "doc_accuracy"
-            ][field]
-
-            print(
-                f"  {field:<20}"
-                f"{correct:>3}/{total:<3} "
-                f"({accuracy:>6.2f}%)"
-            )
-
-        print("\nLine items:")
-
-        print(
-            f"  Ground-truth items:   "
-            f"{metrics['gt_items']}"
-        )
-
-        print(
-            f"  Predicted items:      "
-            f"{metrics['predicted_items']}"
-        )
-
-        print(
-            f"  Matched items:        "
-            f"{metrics['matched_items']}"
-        )
-
-        print(
-            f"  Missing items:        "
-            f"{metrics['missing_items']}"
-        )
-
-        print(
-            f"  Extra items:          "
-            f"{metrics['extra_items']}"
-        )
-
-        print(
-            f"  Item recall:          "
-            f"{metrics['item_recall']:.2f}%"
-        )
-
-        print(
-            f"  Item precision:       "
-            f"{metrics['item_precision']:.2f}%"
-        )
-
-        print(
-            f"  Complete item acc.:   "
-            f"{metrics['complete_item_accuracy']:.2f}%"
-        )
-
-        print("\nLine-item field accuracy:")
-
-        for field in ITEM_FIELDS:
-
-            correct = metrics[
-                "item_correct"
-            ][field]
-
-            total = metrics[
-                "item_total"
-            ][field]
-
-            accuracy = metrics[
-                "item_field_accuracy"
-            ][field]
-
-            print(
-                f"  {field:<20}"
-                f"{correct:>3}/{total:<3} "
-                f"({accuracy:>6.2f}%)"
-            )
-
-        if metrics["hallucinations"]:
-
-            print("\nHallucinated values:")
-
-            for field, count in (
-                metrics["hallucinations"].items()
-            ):
-
-                print(
-                    f"  {field:<25}{count}"
-                )
-
-    except Exception as e:
-
-        print(
-            f"ERROR evaluating "
-            f"{model_name}: {e}"
-        )
-
-
-# ============================================================
-# Benchmark summary
-# ============================================================
-
-print("\n\n")
-print("=" * 115)
-print("BENCHMARK SUMMARY")
-print("=" * 115)
-
-print(
-    f"{'Model / Dataset':<28}"
-    f"{'Valid JSON':>12}"
-    f"{'Field Acc.':>12}"
-    f"{'Item Recall':>13}"
-    f"{'Item Precision':>15}"
-    f"{'Complete Item':>15}"
-)
-
-print("-" * 115)
-
-for model_name, metrics in all_metrics.items():
-
-    print(
-        f"{model_name:<28}"
-        f"{metrics['valid_json_rate']:>11.2f}%"
-        f"{metrics['overall_field_accuracy']:>11.2f}%"
-        f"{metrics['item_recall']:>12.2f}%"
-        f"{metrics['item_precision']:>14.2f}%"
-        f"{metrics['complete_item_accuracy']:>14.2f}%"
+    parser.add_argument(
+        "--data",
+        required=True,
+        help="Path to compact training JSONL.",
     )
 
+    parser.add_argument(
+        "--output_dir",
+        default="models/qwen-invoice-lora-v3",
+        help="Directory where the LoRA adapter will be saved.",
+    )
 
-# ============================================================
-# Save final benchmark
-# ============================================================
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+    )
 
-output_path = "/content/corrected_benchmark_results.json"
+    args = parser.parse_args()
 
-Path(output_path).write_text(
-    json.dumps(
-        {
-            name: {
-                key: value
-                for key, value in metrics.items()
-                if key != "example_details"
-            }
-            for name, metrics in all_metrics.items()
-        },
-        indent=2,
-        ensure_ascii=False
-    ),
-    encoding="utf-8"
-)
+    # ---------------------------------------------------------
+    # Tokenizer
+    # ---------------------------------------------------------
 
-print("\nSaved:")
-print(output_path)
+    print(f"Loading tokenizer: {BASE_MODEL}")
+
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+
+    if tokenizer.pad_token is None:
+        tokenizer.add_special_tokens(
+            {"pad_token": "<|pad|>"}
+        )
+
+    # ---------------------------------------------------------
+    # Base model
+    # ---------------------------------------------------------
+
+    print(f"Loading base model: {BASE_MODEL}")
+
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL,
+        device_map="auto",
+    )
+
+    # Account for the added pad token if necessary.
+    model.resize_token_embeddings(len(tokenizer))
+
+    # ---------------------------------------------------------
+    # LoRA
+    # ---------------------------------------------------------
+
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+        ],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
+    model = get_peft_model(
+        model,
+        lora_config,
+    )
+
+    model.print_trainable_parameters()
+
+    # Gradient checkpointing reduces GPU memory usage.
+    model.gradient_checkpointing_enable()
+
+    # Required when using gradient checkpointing with some
+    # parameter-efficient fine-tuning configurations.
+    model.enable_input_require_grads()
+
+    # ---------------------------------------------------------
+    # Dataset
+    # ---------------------------------------------------------
+
+    print(f"Loading dataset: {args.data}")
+
+    dataset = load_dataset(args.data)
+
+    print(f"Total examples: {len(dataset)}")
+
+    # 90/10 train-validation split.
+    split = dataset.train_test_split(
+        test_size=VALIDATION_RATIO,
+        seed=RANDOM_SEED,
+    )
+
+    train_dataset = split["train"]
+    eval_dataset = split["test"]
+
+    print(f"Training examples: {len(train_dataset)}")
+    print(f"Validation examples: {len(eval_dataset)}")
+
+    # ---------------------------------------------------------
+    # Tokenization
+    # ---------------------------------------------------------
+
+    tokenized_train = train_dataset.map(
+        lambda example: tokenize_and_mask(
+            example,
+            tokenizer,
+        ),
+        remove_columns=train_dataset.column_names,
+    )
+
+    tokenized_eval = eval_dataset.map(
+        lambda example: tokenize_and_mask(
+            example,
+            tokenizer,
+        ),
+        remove_columns=eval_dataset.column_names,
+    )
+
+    # ---------------------------------------------------------
+    # Training arguments
+    # ---------------------------------------------------------
+
+    training_args = TrainingArguments(
+        output_dir=args.output_dir,
+
+        num_train_epochs=args.epochs,
+
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+
+        gradient_accumulation_steps=8,
+
+        learning_rate=2e-4,
+
+        fp16=True,
+
+        logging_steps=10,
+
+        eval_strategy="epoch",
+        save_strategy="epoch",
+
+        save_total_limit=2,
+
+        save_only_model=True,
+
+        report_to="none",
+
+        seed=RANDOM_SEED,
+
+        remove_unused_columns=False,
+    )
+
+    # ---------------------------------------------------------
+    # Trainer
+    # ---------------------------------------------------------
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_eval,
+    )
+
+    # ---------------------------------------------------------
+    # Train
+    # ---------------------------------------------------------
+
+    print("Starting LoRA fine-tuning...")
+
+    trainer.train()
+
+    # ---------------------------------------------------------
+    # Save adapter
+    # ---------------------------------------------------------
+
+    print(f"Saving LoRA adapter to: {args.output_dir}")
+
+    model.save_pretrained(args.output_dir)
+    tokenizer.save_pretrained(args.output_dir)
+
+    print("LoRA adapter saved successfully.")
+
+
+if __name__ == "__main__":
+    main()
