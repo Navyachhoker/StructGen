@@ -1,6 +1,16 @@
+"""
+Local inference service for the Qwen2.5-1.5B LoRA invoice extractor.
+
+Runs separately from the main StructGen application so that
+ML dependencies remain isolated in .venv-ml.
+"""
+
+import json
 from pathlib import Path
 
 import torch
+from fastapi import FastAPI
+from pydantic import BaseModel
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -15,12 +25,16 @@ ADAPTER_PATH = (
     / "qwen-invoice-lora-v3-recovered"
 )
 
-INVOICE_PATH = (
-    PROJECT_ROOT
-    / "data"
-    / "samples"
-    / "invoice_001_clean.txt"
-)
+
+app = FastAPI(title="StructGen LoRA Inference Service")
+
+
+class ExtractionRequest(BaseModel):
+    invoice_text: str
+
+
+class ExtractionResponse(BaseModel):
+    output: str
 
 
 def build_prompt(invoice_text: str) -> str:
@@ -60,37 +74,43 @@ JSON output:
 """
 
 
-def main() -> None:
-    print("Loading tokenizer...")
+print("Loading tokenizer...")
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        ADAPTER_PATH,
-        local_files_only=True,
-    )
+tokenizer = AutoTokenizer.from_pretrained(
+    ADAPTER_PATH,
+    local_files_only=True,
+)
 
-    print("Loading base model...")
+print("Loading base model...")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        dtype=torch.float32,
-    )
+model = AutoModelForCausalLM.from_pretrained(
+    BASE_MODEL,
+    dtype=torch.float32,
+)
 
-    print("Loading LoRA adapter...")
+print("Loading LoRA adapter...")
 
-    model = PeftModel.from_pretrained(
-        model,
-        ADAPTER_PATH,
-    )
+model = PeftModel.from_pretrained(
+    model,
+    ADAPTER_PATH,
+)
 
-    model.eval()
+model.eval()
 
-    print("Model loaded successfully.")
+print("LoRA model loaded successfully.")
 
-    print(f"Reading invoice: {INVOICE_PATH}")
 
-    invoice_text = INVOICE_PATH.read_text(encoding="utf-8")
+@app.get("/health")
+def health() -> dict:
+    return {
+        "status": "ok",
+        "model": "qwen-invoice-lora-v3",
+    }
 
-    prompt = build_prompt(invoice_text)
+
+@app.post("/extract", response_model=ExtractionResponse)
+def extract(request: ExtractionRequest) -> ExtractionResponse:
+    prompt = build_prompt(request.invoice_text)
 
     inputs = tokenizer(
         prompt,
@@ -101,9 +121,6 @@ def main() -> None:
         key: value.to(model.device)
         for key, value in inputs.items()
     }
-
-    print("Generating extraction...")
-    print("CPU generation may take a few minutes.")
 
     with torch.no_grad():
         output_ids = model.generate(
@@ -123,12 +140,15 @@ def main() -> None:
         skip_special_tokens=True,
     )
 
-    print("\n" + "=" * 60)
-    print("LOra MODEL OUTPUT")
-    print("=" * 60)
-    print(output_text)
-    print("=" * 60)
+    # Make sure the service returns clean JSON text.
+    output_text = output_text.strip()
 
+    try:
+        parsed = json.loads(output_text)
+        output_text = json.dumps(parsed)
+    except json.JSONDecodeError:
+        # Return the raw model output.
+        # Main application will perform schema validation.
+        pass
 
-if __name__ == "__main__":
-    main()
+    return ExtractionResponse(output=output_text)

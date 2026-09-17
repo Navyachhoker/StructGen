@@ -1,507 +1,1757 @@
 """
-Streamlit demo - a thin UI over the Invoice Extractor API.
+StructGen Streamlit Dashboard
 
-Three views: Dashboard (stats + recent invoice table), Extract (submit
-text, review result), Benchmark (status checklist until Phase 7's model
-comparison has real numbers).
+UI for the Invoice Extractor system.
+
+Views:
+    - Dashboard
+    - Extract
+    - Benchmark
+
+The Streamlit app is intentionally kept as a presentation layer.
+All extraction logic remains inside the FastAPI + arq backend.
 """
 
+import os
+from datetime import datetime
+from typing import Any
+
+import pandas as pd
 import streamlit as st
-import requests
 
-from api_client import submit_extraction, poll_job, get_stats, get_recent_invoices, API_BASE_URL
+from streamlit_app.api_client import (
+    get_recent_invoices,
+    get_stats,
+    poll_job,
+    submit_extraction,
+)
 
-st.set_page_config(page_title="StructGen", layout="wide")
 
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+# ---------------------------------------------------------------------------
+# Page configuration
+# ---------------------------------------------------------------------------
 
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    #MainMenu, footer, header { visibility: hidden; }
+st.set_page_config(
+    page_title="StructGen",
+    page_icon="SG",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-    .stApp { background: #F7F8FA; color: #1F2937; }
-    .block-container { padding-top: 2rem; max-width: 1360px; }
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+APP_TITLE = "StructGen"
+APP_SUBTITLE = "Invoice Intelligence"
+
+API_BASE_URL = os.getenv(
+    "API_BASE_URL",
+    "http://127.0.0.1:8000",
+)
+
+PRIMARY_MODEL = "qwen-invoice-lora-v3"
+FALLBACK_MODEL = "openai/gpt-oss-120b"
+
+
+# ---------------------------------------------------------------------------
+# Benchmark data
+# ---------------------------------------------------------------------------
+#
+# These are the final corrected benchmark results from the project.
+# Keep dataset labels explicit because Synthetic and Real are different
+# evaluation sets.
+# ---------------------------------------------------------------------------
+
+BENCHMARK_RESULTS = [
+    {
+        "Model": "Groq",
+        "Dataset": "Synthetic",
+        "Valid JSON": 100.00,
+        "Field Accuracy": 89.80,
+        "Item Recall": 94.92,
+        "Item Precision": 100.00,
+        "Complete Item": 83.05,
+    },
+    {
+        "Model": "Groq",
+        "Dataset": "Real",
+        "Valid JSON": 100.00,
+        "Field Accuracy": 79.12,
+        "Item Recall": 97.56,
+        "Item Precision": 95.24,
+        "Complete Item": 60.98,
+    },
+    {
+        "Model": "LoRA Qwen v3",
+        "Dataset": "Real",
+        "Valid JSON": 92.31,
+        "Field Accuracy": 54.95,
+        "Item Recall": 58.54,
+        "Item Precision": 70.59,
+        "Complete Item": 29.27,
+    },
+    {
+        "Model": "Base Qwen",
+        "Dataset": "Real",
+        "Valid JSON": 92.31,
+        "Field Accuracy": 46.15,
+        "Item Recall": 60.98,
+        "Item Precision": 92.59,
+        "Complete Item": 24.39,
+    },
+]
+
+BENCHMARK_DF = pd.DataFrame(BENCHMARK_RESULTS)
+
+
+# ---------------------------------------------------------------------------
+# CSS
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    """
+    <style>
+
+    /* ------------------------------------------------------------------ */
+    /* Global                                                              */
+    /* ------------------------------------------------------------------ */
+
+    .stApp {
+        background: #f6f7fb;
+        color: #172033;
+    }
+
+    .main .block-container {
+        max-width: 1400px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
+
+    h1, h2, h3 {
+        color: #172033;
+        letter-spacing: -0.02em;
+    }
+
+    p {
+        color: #667085;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Sidebar                                                             */
+    /* ------------------------------------------------------------------ */
 
     [data-testid="stSidebar"] {
-        background: #FFFFFF;
-        border-right: 1px solid #E5E7EB;
+        background: #ffffff;
+        border-right: 1px solid #e5e7eb;
     }
-    [data-testid="stSidebar"] .block-container { padding-top: 1.5rem; }
 
-    .brand { font-size: 1.05rem; font-weight: 700; color: #1F2937; margin-bottom: 0.05rem; }
-    .brand-sub { font-size: 0.75rem; color: #9CA3AF; margin-bottom: 1.4rem; }
+    [data-testid="stSidebar"] > div:first-child {
+        padding-top: 1.5rem;
+    }
 
-    /* Active nav item is a plain styled div, not a widget - this is
-       the fix for the active-state highlight never appearing. The
-       previous version relied on a CSS :has() selector targeting a
-       checked radio input, which several Chromium builds render
-       inconsistently. A plain div has no such dependency. */
-    .nav-active {
-        background: #EEF2FF;
-        color: #4F46E5;
-        font-weight: 600;
-        padding: 0.5rem 0.7rem;
-        border-radius: 8px;
+    .sidebar-brand {
+        padding: 0.25rem 0.75rem 1.5rem 0.75rem;
+    }
+
+    .sidebar-brand-title {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #172033;
         margin-bottom: 0.15rem;
+    }
+
+    .sidebar-brand-subtitle {
+        font-size: 0.72rem;
+        color: #98a2b3;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .sidebar-section {
+        font-size: 0.68rem;
+        color: #98a2b3;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 0.5rem 0.75rem 0.4rem 0.75rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Header                                                              */
+    /* ------------------------------------------------------------------ */
+
+    .page-header {
+        margin-bottom: 1.5rem;
+    }
+
+    .page-kicker {
+        color: #667085;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        margin-bottom: 0.35rem;
+    }
+
+    .page-title {
+        font-size: 2rem;
+        font-weight: 750;
+        line-height: 1.15;
+        color: #172033;
+        margin-bottom: 0.35rem;
+    }
+
+    .page-description {
+        color: #667085;
         font-size: 0.95rem;
-    }
-    [data-testid="stSidebar"] .stButton button {
-        background: transparent;
-        color: #374151;
-        border: none;
-        text-align: left;
-        font-weight: 500;
-        padding: 0.5rem 0.7rem;
-        width: 100%;
-        justify-content: flex-start;
-    }
-    [data-testid="stSidebar"] .stButton button:hover {
-        background: #F3F4F6;
-        color: #1F2937;
-    }
-    [data-testid="stSidebar"] .stButton button p { text-align: left; }
-
-    .system-status {
-        border-top: 1px solid #E5E7EB;
-        margin-top: 1.5rem;
-        padding-top: 0.9rem;
-        font-size: 0.8rem;
-        color: #6B7280;
-    }
-    .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
-    .status-ok { background: #10B981; }
-    .status-down { background: #EF4444; }
-
-    .page-title { font-size: 1.55rem; font-weight: 700; color: #1F2937; margin-bottom: 0.2rem; }
-    .page-subtitle { color: #6B7280; font-size: 0.92rem; margin-bottom: 1.6rem; }
-
-    .stat-block { border-top: 2px solid #E5E7EB; padding-top: 0.6rem; }
-    .stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: #9CA3AF; margin-bottom: 0.3rem; font-weight: 600; }
-    .stat-value { font-size: 1.6rem; font-weight: 700; color: #1F2937; }
-
-    .badge { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
-    .badge-success { background: #D1FAE5; color: #065F46; }
-    .badge-failed  { background: #FEE2E2; color: #991B1B; }
-    .badge-pending { background: #FEF3C7; color: #92400E; }
-
-    /* Explicit !important on both text color and placeholder color -
-       the earlier version set textarea color but not placeholder
-       color, and on some local Streamlit theme configs the base theme
-       variable was winning over the plain class selector, producing
-       near-invisible light-on-white text. */
-    .stTextArea textarea {
-        background: #FFFFFF !important;
-        border: 1px solid #D1D5DB !important;
-        border-radius: 8px;
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.85rem;
-        color: #111827 !important;
-    }
-    .stTextArea textarea::placeholder {
-        color: #9CA3AF !important;
-        opacity: 1;
+        max-width: 800px;
     }
 
-    .stButton button {
-        background: #4F46E5;
-        color: #FFFFFF;
-        border: none;
-        border-radius: 6px;
-        font-weight: 600;
-        padding: 0.5rem 1.6rem;
-    }
-    .stButton button:hover { background: #4338CA; color: #FFFFFF; }
+    /* ------------------------------------------------------------------ */
+    /* Cards                                                               */
+    /* ------------------------------------------------------------------ */
 
-    .panel { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 10px; padding: 1.3rem; }
-    .panel-title { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: #9CA3AF; font-weight: 600; margin-bottom: 0.9rem; }
-
-    .field-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #9CA3AF; font-weight: 600; margin-top: 0.7rem; }
-    .field-value { font-size: 0.98rem; color: #1F2937; font-weight: 500; }
-    .field-muted { font-size: 0.9rem; color: #9CA3AF; font-style: italic; }
-
-    .totals-row { display: flex; justify-content: space-between; padding: 0.3rem 0; color: #374151; font-size: 0.92rem; }
-    .totals-row.grand-total { border-top: 1px solid #E5E7EB; margin-top: 0.4rem; padding-top: 0.6rem; font-weight: 700; color: #1F2937; }
-
-    .meta-row { display: flex; gap: 3rem; border-top: 1px solid #E5E7EB; margin-top: 1.2rem; padding-top: 0.9rem; }
-    .meta-item .field-label { margin-top: 0; }
-
-    .checklist-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0; font-size: 0.92rem; color: #374151; }
-    .check-yes { color: #10B981; font-weight: 700; }
-    .check-no { color: #D1D5DB; font-weight: 700; }
-
-    /* st.expander ("Details") isn't covered by any selector above, so
-       its default header uses Streamlit's base theme background/text
-       colors - dark until the :hover state (Streamlit's own hover CSS)
-       happens to override it. Forcing both states light fixes the
-       "black until hovered" bug. */
-    [data-testid="stExpander"] {
-        background: #FFFFFF;
-        border: 1px solid #E5E7EB;
-        border-radius: 8px;
-    }
-    [data-testid="stExpander"] summary {
-        background: #FFFFFF !important;
-        color: #374151 !important;
-    }
-    [data-testid="stExpander"] summary:hover {
-        background: #F9FAFB !important;
-    }
-    [data-testid="stExpander"] div[data-testid="stExpanderDetails"] {
-        background: #FFFFFF;
-    }
-
-    /* Boxed stat cards - bordered, with a colored icon chip, closer to
-       the reference dashboards than the earlier flat hairline style. */
-    .stat-card {
-        background: #FFFFFF;
-        border: 1px solid #E5E7EB;
+    .card {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
         border-radius: 12px;
-        padding: 1.1rem 1.3rem;
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
+        padding: 1.25rem;
+        margin-bottom: 1rem;
     }
-    .stat-card-label { font-size: 0.82rem; color: #6B7280; font-weight: 500; margin-bottom: 0.5rem; }
-    .stat-card-value { font-size: 1.9rem; font-weight: 700; color: #1F2937; }
-    .stat-icon {
-        width: 38px;
-        height: 38px;
-        border-radius: 10px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.1rem;
-        flex-shrink: 0;
-    }
-    .stat-icon-indigo { background: #EEF2FF; color: #4F46E5; }
-    .stat-icon-green  { background: #D1FAE5; color: #059669; }
-    .stat-icon-amber  { background: #FEF3C7; color: #D97706; }
-    .stat-icon-blue   { background: #DBEAFE; color: #2563EB; }
 
-    .invoice-row {
-        background: #FFFFFF;
-        border: 1px solid #E5E7EB;
-        border-radius: 10px;
-        padding: 0.9rem 1.1rem;
+    .card-title {
+        color: #172033;
+        font-size: 0.95rem;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+
+    .card-subtitle {
+        color: #98a2b3;
+        font-size: 0.78rem;
+        margin-bottom: 1rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* KPI cards                                                           */
+    /* ------------------------------------------------------------------ */
+
+    .metric-card {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 1.15rem 1.2rem;
+        min-height: 118px;
+    }
+
+    .metric-label {
+        color: #667085;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
         margin-bottom: 0.55rem;
     }
-</style>
-""", unsafe_allow_html=True)
 
-NAV_OPTIONS = ["Dashboard", "Extract", "Benchmark"]
+    .metric-value {
+        color: #172033;
+        font-size: 1.65rem;
+        font-weight: 750;
+        line-height: 1.1;
+    }
 
-if "current_page" not in st.session_state:
-    st.session_state.current_page = "Dashboard"
+    .metric-note {
+        color: #98a2b3;
+        font-size: 0.72rem;
+        margin-top: 0.45rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Section headings                                                    */
+    /* ------------------------------------------------------------------ */
+
+    .section-heading {
+        font-size: 1.05rem;
+        font-weight: 700;
+        color: #172033;
+        margin-top: 1.2rem;
+        margin-bottom: 0.8rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Status badges                                                       */
+    /* ------------------------------------------------------------------ */
+
+    .status-badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 0.25rem 0.6rem;
+        font-size: 0.68rem;
+        font-weight: 700;
+        line-height: 1;
+    }
+
+    .status-success {
+        background: #ecfdf3;
+        color: #027a48;
+    }
+
+    .status-failed {
+        background: #fef3f2;
+        color: #b42318;
+    }
+
+    .status-warning {
+        background: #fffaeb;
+        color: #b54708;
+    }
+
+    .status-neutral {
+        background: #f2f4f7;
+        color: #475467;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Extraction result                                                   */
+    /* ------------------------------------------------------------------ */
+
+    .result-field {
+        background: #f8fafc;
+        border: 1px solid #eaecf0;
+        border-radius: 8px;
+        padding: 0.75rem;
+        margin-bottom: 0.65rem;
+    }
+
+    .field-label {
+        color: #98a2b3;
+        font-size: 0.65rem;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        margin-bottom: 0.25rem;
+    }
+
+    .field-value {
+        color: #172033;
+        font-size: 0.88rem;
+        font-weight: 600;
+        word-break: break-word;
+    }
+
+    .meta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.8rem;
+        margin-top: 0.8rem;
+    }
+
+    .meta-item {
+        flex: 1;
+        min-width: 150px;
+        background: #f8fafc;
+        border: 1px solid #eaecf0;
+        border-radius: 8px;
+        padding: 0.7rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Pipeline                                                            */
+    /* ------------------------------------------------------------------ */
+
+    .pipeline {
+        display: flex;
+        flex-direction: column;
+        gap: 0.55rem;
+    }
+
+    .checklist-row {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        color: #475467;
+        font-size: 0.82rem;
+    }
+
+    .check-yes {
+        color: #039855;
+        font-weight: 700;
+    }
+
+    .check-neutral {
+        color: #98a2b3;
+        font-weight: 700;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Benchmark cards                                                     */
+    /* ------------------------------------------------------------------ */
+
+    .benchmark-card {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 1.1rem;
+        margin-bottom: 0.9rem;
+    }
+
+    .benchmark-model {
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: #172033;
+    }
+
+    .benchmark-dataset {
+        font-size: 0.7rem;
+        color: #667085;
+        margin-top: 0.2rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+
+    .benchmark-score {
+        font-size: 1.45rem;
+        font-weight: 750;
+        color: #172033;
+        margin-top: 0.75rem;
+    }
+
+    .benchmark-label {
+        color: #98a2b3;
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .finding-box {
+        background: #f8fafc;
+        border: 1px solid #e5e7eb;
+        border-left: 3px solid #4f46e5;
+        border-radius: 8px;
+        padding: 1rem 1.1rem;
+        margin: 0.8rem 0;
+    }
+
+    .finding-title {
+        font-weight: 700;
+        color: #172033;
+        margin-bottom: 0.35rem;
+    }
+
+    .finding-text {
+        color: #667085;
+        font-size: 0.82rem;
+        line-height: 1.55;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Buttons                                                             */
+    /* ------------------------------------------------------------------ */
+
+    .stButton > button {
+        border-radius: 8px;
+        font-weight: 650;
+        min-height: 2.5rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Text area                                                           */
+    /* ------------------------------------------------------------------ */
+
+    textarea {
+        background: #ffffff !important;
+        color: #172033 !important;
+        border-color: #d0d5dd !important;
+        font-family: "IBM Plex Mono", monospace !important;
+        font-size: 0.82rem !important;
+        line-height: 1.55 !important;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Tables                                                              */
+    /* ------------------------------------------------------------------ */
+
+    [data-testid="stDataFrame"] {
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Alerts                                                              */
+    /* ------------------------------------------------------------------ */
+
+    .stAlert {
+        border-radius: 8px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
-def fmt_money(value):
-    """Consistent $X,XXX.XX formatting. Falls back to the raw string if
-    the value isn't numeric, rather than raising - failed-extraction
-    rows can have odd/missing values and shouldn't crash the table."""
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+
+def safe_value(value: Any, default: str = "Not detected") -> str:
+    """Return a display-safe value for missing or empty fields."""
     if value is None:
-        return None
+        return default
+
+    text = str(value).strip()
+
+    if not text:
+        return default
+
+    return text
+
+
+def format_currency(value: Any, currency: Any = None) -> str:
+    """Format monetary values consistently."""
+    if value is None or str(value).strip() == "":
+        return "Not detected"
+
+    currency_code = safe_value(currency, "")
+
     try:
-        return f"${float(value):,.2f}"
+        amount = float(value)
+        if currency_code:
+            return f"{currency_code} {amount:,.2f}"
+        return f"{amount:,.2f}"
+    except (TypeError, ValueError):
+        if currency_code:
+            return f"{currency_code} {value}"
+        return str(value)
+
+
+def format_latency(value: Any) -> str:
+    """Format latency values."""
+    if value is None:
+        return "Not available"
+
+    try:
+        return f"{float(value):.2f}s"
     except (TypeError, ValueError):
         return str(value)
 
 
-# --- Sidebar navigation ---
-# Rebuilt as plain buttons rather than a styled radio widget: the active
-# item renders as a non-interactive styled div, and every other item is
-# a real button. This has no dependency on CSS pseudo-selectors, unlike
-# the previous :has()-based approach, which never actually highlighted
-# in the browser being tested with.
-with st.sidebar:
-    st.markdown('<div class="brand">StructGen</div>', unsafe_allow_html=True)
-    st.markdown('<div class="brand-sub">Invoice Intelligence</div>', unsafe_allow_html=True)
+def format_cost(value: Any) -> str:
+    """Format estimated cost."""
+    if value is None:
+        return "$0.000000"
 
-    for opt in NAV_OPTIONS:
-        if st.session_state.current_page == opt:
-            st.markdown(f'<div class="nav-active">{opt}</div>', unsafe_allow_html=True)
-        else:
-            if st.button(opt, key=f"nav_{opt}"):
-                st.session_state.current_page = opt
-                st.rerun()
-
-    # Two real checks (not fabricated): API reachability via /health,
-    # and Postgres reachability via whether /stats succeeds (that
-    # endpoint requires a DB round-trip). Redis/worker aren't split out
-    # separately here since there's no endpoint that checks them in
-    # isolation yet - only showing what's actually verifiable today.
     try:
-        health_ok = requests.get(f"{API_BASE_URL}/health", timeout=5).ok
-    except requests.RequestException:
-        health_ok = False
-    db_ok = get_stats() is not None
+        return f"${float(value):.6f}"
+    except (TypeError, ValueError):
+        return str(value)
 
-    def status_line(label, ok):
-        dot = "status-ok" if ok else "status-down"
-        text = "Connected" if ok else "Unreachable"
-        return f'<div style="display:flex;justify-content:space-between;margin-top:0.3rem;"><span>{label}</span><span><span class="status-dot {dot}"></span>{text}</span></div>'
 
+def render_page_header(kicker: str, title: str, description: str) -> None:
+    """Render the shared page header."""
     st.markdown(
-        '<div class="system-status">'
-        + status_line("API", health_ok)
-        + status_line("Database", db_ok)
-        + '</div>',
+        f"""
+        <div class="page-header">
+            <div class="page-kicker">{kicker}</div>
+            <div class="page-title">{title}</div>
+            <div class="page-description">{description}</div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-page = st.session_state.current_page
+
+def render_metric(
+    label: str,
+    value: str,
+    note: str = "",
+) -> None:
+    """Render a KPI metric card."""
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+            <div class="metric-note">{note}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def stat_card(col, label, value, icon, icon_style):
-    with col:
-        st.markdown(
-            f'<div class="stat-card">'
-            f'<div><div class="stat-card-label">{label}</div>'
-            f'<div class="stat-card-value">{value}</div></div>'
-            f'<div class="stat-icon {icon_style}">{icon}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
+def render_field(label: str, value: Any) -> None:
+    """Render a single extracted field."""
+    st.markdown(
+        f"""
+        <div class="result-field">
+            <div class="field-label">{label}</div>
+            <div class="field-value">{safe_value(value)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_status(status: str) -> str:
+    """Return HTML for a status badge."""
+    normalized = str(status).lower()
+
+    if normalized in {"success", "complete", "completed"}:
+        return (
+            '<span class="status-badge status-success">'
+            "SUCCESS"
+            "</span>"
         )
 
+    if normalized in {"failed", "error"}:
+        return (
+            '<span class="status-badge status-failed">'
+            "FAILED"
+            "</span>"
+        )
 
-# ============================================================
+    if normalized in {"queued", "in_progress", "pending"}:
+        return (
+            '<span class="status-badge status-warning">'
+            "PROCESSING"
+            "</span>"
+        )
+
+    return (
+        '<span class="status-badge status-neutral">'
+        f"{str(status).upper()}"
+        "</span>"
+    )
+
+
+def get_invoice_from_result(result: dict) -> dict:
+    """Safely retrieve the invoice payload."""
+    invoice = result.get("invoice")
+
+    if isinstance(invoice, dict):
+        return invoice
+
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+
+    st.markdown(
+        """
+        <div class="sidebar-brand">
+            <div class="sidebar-brand-title">StructGen</div>
+            <div class="sidebar-brand-subtitle">
+                Invoice Intelligence
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="sidebar-section">Workspace</div>',
+        unsafe_allow_html=True,
+    )
+
+    page = st.radio(
+        "Navigation",
+        [
+            "Dashboard",
+            "Extract",
+            "Benchmark",
+        ],
+        label_visibility="collapsed",
+    )
+
+    st.markdown("---")
+
+    st.markdown(
+        '<div class="sidebar-section">System</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.caption(f"API: {API_BASE_URL}")
+
+    # Simple API health indicator.
+    try:
+        import requests
+
+        response = requests.get(
+            f"{API_BASE_URL}/health",
+            timeout=3,
+        )
+
+        if response.ok:
+            st.success("API connected")
+        else:
+            st.warning("API unavailable")
+
+    except requests.RequestException:
+        st.error("API offline")
+
+    st.markdown("---")
+
+    st.caption(
+        "Primary: Qwen2.5-1.5B + LoRA v3"
+    )
+
+    st.caption(
+        "Fallback: Groq GPT-OSS-120B"
+    )
+
+
+# ===========================================================================
 # DASHBOARD
-# ============================================================
+# ===========================================================================
+
 if page == "Dashboard":
-    title_col, button_col = st.columns([4, 1])
-    with title_col:
-        st.markdown('<div class="page-title">Invoice Processing</div>', unsafe_allow_html=True)
-        st.markdown('<div class="page-subtitle">Monitor your extraction pipeline.</div>', unsafe_allow_html=True)
-    with button_col:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("+ Process Invoice"):
-            st.session_state.current_page = "Extract"
-            st.rerun()
+
+    render_page_header(
+        "Overview",
+        "Invoice extraction dashboard",
+        "Monitor extraction activity, model usage, latency, and recent results.",
+    )
+
+    # -----------------------------------------------------------------------
+    # KPI cards
+    # -----------------------------------------------------------------------
 
     stats = get_stats()
 
     if stats is None:
-        st.warning("API not reachable. Confirm the FastAPI service is running.")
-    else:
-        c1, c2, c3, c4 = st.columns(4)
-        stat_card(c1, "Requests", stats["total_requests"], "📄", "stat-icon-indigo")
-        stat_card(c2, "Success Rate", f"{stats['success_rate'] * 100:.1f}%", "✓", "stat-icon-green")
-        avg_latency = f"{stats['average_latency_seconds']:.2f}s" if stats["average_latency_seconds"] else "-"
-        stat_card(c3, "Avg Latency", avg_latency, "⏱", "stat-icon-amber")
-        stat_card(c4, "Total Cost", f"${stats['total_estimated_cost_usd']:.4f}", "$", "stat-icon-blue")
+        st.warning(
+            "Dashboard statistics are currently unavailable. "
+            "Make sure the FastAPI service and database are running."
+        )
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="field-label" style="font-size:0.85rem;">RECENT INVOICES</div>', unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
+        stats = {}
 
-    invoices = get_recent_invoices(limit=20)
-
-    if not invoices:
-        st.info("No extraction records yet — submit one from the Extract tab.")
-    else:
-        header_cols = st.columns([1.2, 1.6, 1, 1, 0.9, 0.8])
-        for c, h in zip(header_cols, ["Invoice #", "Vendor", "Total", "Status", "Latency", ""]):
-            c.markdown(f'<div class="field-label">{h}</div>', unsafe_allow_html=True)
-
-        for inv in invoices:
-            with st.container(border=True):
-                cols = st.columns([1.2, 1.6, 1, 1, 0.9, 0.8])
-
-                if inv["success"]:
-                    invoice_num_display = inv["invoice_number"] or "Not detected"
-                    cols[0].markdown(f'<div class="field-value">{invoice_num_display}</div>', unsafe_allow_html=True)
-                    cols[1].markdown(f'<div class="field-value">{inv["vendor_name"] or "—"}</div>', unsafe_allow_html=True)
-                    total_display = fmt_money(inv["total_amount"]) or "—"
-                    cols[2].markdown(f'<div class="field-value">{total_display}</div>', unsafe_allow_html=True)
-                    cols[3].markdown('<span class="badge badge-success">Processed</span>', unsafe_allow_html=True)
-                else:
-                    cols[0].markdown('<div class="field-muted">Extraction Failed</div>', unsafe_allow_html=True)
-                    cols[1].markdown('<div class="field-muted">Unknown</div>', unsafe_allow_html=True)
-                    cols[2].markdown('<div class="field-muted">—</div>', unsafe_allow_html=True)
-                    cols[3].markdown('<span class="badge badge-failed">Failed</span>', unsafe_allow_html=True)
-
-                cols[4].markdown(f'<div class="field-value">{inv["latency_seconds"]:.2f}s</div>', unsafe_allow_html=True)
-                with cols[5]:
-                    with st.expander("Details"):
-                        st.markdown(f'<div class="field-label">MODEL</div><div class="field-value" style="font-family:\'IBM Plex Mono\',monospace;font-size:0.85rem;">{inv["model_name"]}</div>', unsafe_allow_html=True)
-                        st.markdown(f'<div class="field-label">EST. COST</div><div class="field-value">${inv["estimated_cost_usd"]:.6f}</div>', unsafe_allow_html=True)
-                        if not inv["success"]:
-                            st.markdown(f'<div class="field-label">STATUS</div><div class="field-value" style="color:#991B1B;">Failed</div>', unsafe_allow_html=True)
-                        if inv["error"]:
-                            st.markdown(f'<div class="field-label">REASON</div><div class="field-value" style="color:#991B1B;">{inv["error"]}</div>', unsafe_allow_html=True)
-
-        # One simple visualization rather than several - a latency trend
-        # across recent requests, oldest to newest (API returns newest
-        # first, so reverse for a left-to-right timeline).
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="field-label" style="font-size:0.85rem;">LATENCY TREND</div>', unsafe_allow_html=True)
-        latencies = [inv["latency_seconds"] for inv in reversed(invoices)]
-        st.line_chart(latencies, height=200)
-
-
-# ============================================================
-# EXTRACT
-# ============================================================
-elif page == "Extract":
-    st.markdown('<div class="page-title">Process Invoice</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="page-subtitle">Turn unstructured invoice text into validated structured data.</div>',
-        unsafe_allow_html=True,
+    total_requests = stats.get(
+        "total_requests",
+        stats.get("requests", 0),
     )
 
-    example_text = """ACME Office Supplies
-Invoice #: INV-2024-0091
-Date: 2024-03-15
-
-Printer Paper (Box) x3 - $74.97
-Stapler x1 - $8.50
-
-Subtotal: $83.47
-Tax: $6.68
-Total Due: $90.15"""
-
-    if "last_result" not in st.session_state:
-        st.session_state.last_result = None
-        st.session_state.last_raw_text = ""
-
-    raw_text = st.text_area(
-        "Invoice text",
-        value="",
-        placeholder=example_text,
-        height=180,
-        label_visibility="collapsed",
+    successful_requests = stats.get(
+        "successful_requests",
+        stats.get("successful", 0),
     )
-    submit = st.button("Process Invoice", disabled=not raw_text.strip())
 
-    if submit:
-        with st.spinner("Submitting..."):
-            try:
-                job_id = submit_extraction(raw_text)
-            except Exception as e:
-                st.error(f"Failed to reach the API: {e}")
-                st.stop()
+    success_rate = stats.get(
+        "success_rate",
+        0,
+    )
 
-        with st.spinner("Extracting..."):
-            job = poll_job(job_id)
+    avg_latency = stats.get(
+        "avg_latency_seconds",
+        stats.get("average_latency_seconds", 0),
+    )
 
-        st.session_state.last_result = job
-        st.session_state.last_raw_text = raw_text
+    total_cost = stats.get(
+        "total_estimated_cost_usd",
+        stats.get("total_cost_usd", 0),
+    )
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
 
-    job = st.session_state.last_result
-    if job is not None:
-        header_col, status_col = st.columns([4, 1])
-        with header_col:
-            st.markdown('<div class="field-label" style="font-size:0.85rem;">EXTRACTION RESULT</div>', unsafe_allow_html=True)
-        with status_col:
-            if job["status"] != "timeout" and job["result"]["success"]:
-                st.markdown('<span class="badge badge-success">Processed</span>', unsafe_allow_html=True)
-            elif job["status"] == "timeout":
-                st.markdown('<span class="badge badge-pending">Timeout</span>', unsafe_allow_html=True)
-            else:
-                st.markdown('<span class="badge badge-failed">Failed</span>', unsafe_allow_html=True)
+    with col1:
+        render_metric(
+            "Requests",
+            str(total_requests),
+            "Total extraction jobs",
+        )
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        left, right = st.columns([1, 1], gap="large")
-
-        with left:
-            st.markdown('<div class="panel"><div class="panel-title">SOURCE</div>', unsafe_allow_html=True)
-            st.text(st.session_state.last_raw_text)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with right:
-            if job["status"] == "timeout":
-                st.markdown('<div class="panel">', unsafe_allow_html=True)
-                st.error("Timed out waiting for extraction. The service may be under load — try again.")
-                st.markdown('</div>', unsafe_allow_html=True)
-            elif job["result"]["success"]:
-                inv = job["result"]["invoice"]
-                panel_html = ['<div class="panel"><div class="panel-title">EXTRACTED DATA</div>']
-
-                for label, key in [("Vendor", "vendor_name"), ("Invoice Number", "invoice_number"), ("Invoice Date", "invoice_date")]:
-                    value = inv.get(key)
-                    panel_html.append(
-                        f'<div class="field-label">{label}</div>'
-                        f'<div class="field-value">{value if value is not None else "—"}</div>'
-                    )
-
-                subtotal = fmt_money(inv.get("subtotal"))
-                tax = fmt_money(inv.get("tax_amount"))
-                total = fmt_money(inv.get("total_amount"))
-                panel_html.append('<div style="margin-top:1rem;">')
-                if subtotal:
-                    panel_html.append(f'<div class="totals-row"><span>Subtotal</span><span>{subtotal}</span></div>')
-                if tax:
-                    panel_html.append(f'<div class="totals-row"><span>Tax</span><span>{tax}</span></div>')
-                panel_html.append(f'<div class="totals-row grand-total"><span>Total</span><span>{total or "—"}</span></div>')
-                panel_html.append('</div></div>')
-
-                st.markdown("".join(panel_html), unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="panel">', unsafe_allow_html=True)
-                st.error(f"Extraction failed: {job['result']['error']}")
-                st.markdown('</div>', unsafe_allow_html=True)
-
-        if job["status"] != "timeout":
-            st.markdown("<br>", unsafe_allow_html=True)
-            # Honest post-hoc confirmation of the pipeline stages that
-            # actually ran - not a simulated live progress bar, since
-            # by the time this renders the job has already completed.
-            # This exists to make the async architecture (API -> Redis
-            # queue -> in-process arq worker -> Groq -> Postgres)
-            # visible in the UI, not just in the code.
-            validated_ok = job["result"]["success"]
-            st.markdown(
-                '<div class="panel"><div class="panel-title">PROCESSING PIPELINE</div>'
-                '<div class="checklist-row"><span class="check-yes">✓</span>Request accepted</div>'
-                '<div class="checklist-row"><span class="check-yes">✓</span>Job queued (Redis)</div>'
-                '<div class="checklist-row"><span class="check-yes">✓</span>Processed by worker (Groq call)</div>'
-                f'<div class="checklist-row"><span class="{"check-yes" if validated_ok else "check-no"}">{"✓" if validated_ok else "✕"}</span>Schema validation {"passed" if validated_ok else "failed"}</div>'
-                '<div class="checklist-row"><span class="check-yes">✓</span>Record stored (Postgres)</div>'
-                '</div>',
-                unsafe_allow_html=True,
+    with col2:
+        if success_rate:
+            success_display = f"{float(success_rate):.1f}%"
+        elif total_requests:
+            success_display = (
+                f"{(successful_requests / total_requests) * 100:.1f}%"
             )
+        else:
+            success_display = "0.0%"
 
-        if job["status"] != "timeout" and job["result"]["success"]:
-            st.markdown(
-                f'<div class="meta-row">'
-                f'<div class="meta-item"><div class="field-label">LATENCY</div>'
-                f'<div class="field-value">{job["result"]["latency_seconds"]:.2f}s</div></div>'
-                f'<div class="meta-item"><div class="field-label">ESTIMATED COST</div>'
-                f'<div class="field-value">${job["result"]["estimated_cost_usd"]:.6f}</div></div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-    else:
+        render_metric(
+            "Success Rate",
+            success_display,
+            "Completed successfully",
+        )
+
+    with col3:
+        render_metric(
+            "Avg Latency",
+            format_latency(avg_latency),
+            "Across recorded jobs",
+        )
+
+    with col4:
+        render_metric(
+            "Estimated Cost",
+            format_cost(total_cost),
+            "Recorded model cost",
+        )
+
+    # -----------------------------------------------------------------------
+    # Quick action
+    # -----------------------------------------------------------------------
+
+    st.markdown('<div class="section-heading">Quick action</div>', unsafe_allow_html=True)
+
+    action_col1, action_col2 = st.columns([1, 3])
+
+    with action_col1:
+        if st.button(
+            "Process Invoice",
+            type="primary",
+            use_container_width=True,
+        ):
+            st.session_state["page_override"] = "Extract"
+            st.rerun()
+
+    with action_col2:
         st.markdown(
-            '<div class="panel" style="color:#9CA3AF;">Submit invoice text above to see the extracted result here.</div>',
+            """
+            <div style="
+                padding:0.65rem 0.9rem;
+                color:#667085;
+                font-size:0.82rem;
+            ">
+                Submit invoice or receipt text and StructGen will process it
+                asynchronously through the FastAPI + arq pipeline.
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
+    # -----------------------------------------------------------------------
+    # Recent invoices
+    # -----------------------------------------------------------------------
 
-# ============================================================
+    st.markdown(
+        '<div class="section-heading">Recent extractions</div>',
+        unsafe_allow_html=True,
+    )
+
+    recent = get_recent_invoices(limit=20)
+
+    if recent is None:
+        st.info("No recent extraction records are available.")
+    elif not recent:
+        st.info(
+            "No extraction records yet. Process an invoice to populate this table."
+        )
+    else:
+
+        table_rows = []
+
+        for item in recent:
+
+            invoice_number = safe_value(
+                item.get("invoice_number")
+            )
+
+            vendor_name = safe_value(
+                item.get("vendor_name")
+            )
+
+            total_amount = item.get(
+                "total_amount"
+            )
+
+            currency = item.get(
+                "currency"
+            )
+
+            status = item.get(
+                "status",
+                "unknown",
+            )
+
+            latency = item.get(
+                "latency_seconds"
+            )
+
+            model_name = safe_value(
+                item.get(
+                    "model_name"
+                ),
+                "Unknown",
+            )
+
+            table_rows.append(
+                {
+                    "Invoice": invoice_number,
+                    "Vendor": vendor_name,
+                    "Total": format_currency(
+                        total_amount,
+                        currency,
+                    ),
+                    "Status": str(status).upper(),
+                    "Model": model_name,
+                    "Latency": format_latency(latency),
+                }
+            )
+
+        recent_df = pd.DataFrame(table_rows)
+
+        st.dataframe(
+            recent_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    # -----------------------------------------------------------------------
+    # Latency chart
+    # -----------------------------------------------------------------------
+
+    if recent:
+
+        latency_rows = []
+
+        for item in recent:
+            latency = item.get("latency_seconds")
+
+            if latency is None:
+                continue
+
+            latency_rows.append(
+                {
+                    "Invoice": safe_value(
+                        item.get("invoice_number"),
+                        "Unknown",
+                    ),
+                    "Latency (s)": float(latency),
+                }
+            )
+
+        if latency_rows:
+
+            st.markdown(
+                '<div class="section-heading">Latency trend</div>',
+                unsafe_allow_html=True,
+            )
+
+            latency_df = pd.DataFrame(latency_rows)
+
+            st.line_chart(
+                latency_df.set_index("Invoice")[
+                    ["Latency (s)"]
+                ],
+                height=280,
+            )
+
+
+# ===========================================================================
+# EXTRACT
+# ===========================================================================
+
+elif page == "Extract":
+
+    render_page_header(
+        "Extraction",
+        "Extract structured invoice data",
+        "Submit raw invoice or receipt text and inspect the structured JSON returned by the model.",
+    )
+
+    # -----------------------------------------------------------------------
+    # Input
+    # -----------------------------------------------------------------------
+
+    left_col, right_col = st.columns(
+        [1.05, 0.95],
+        gap="large",
+    )
+
+    with left_col:
+
+        st.markdown(
+            """
+            <div class="card-title">Invoice / receipt text</div>
+            <div class="card-subtitle">
+                Paste the raw document text below.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        default_text = ""
+
+        raw_text = st.text_area(
+            "Invoice text",
+            value=default_text,
+            height=430,
+            placeholder=(
+                "Paste invoice or receipt text here...\n\n"
+                "Example:\n"
+                "TechMart\n"
+                "Invoice No: INV-2001\n"
+                "Date: 2026-09-16\n\n"
+                "Laptop Stand  1  45.02  45.02\n"
+                "Mousepad       2  26.32  52.64\n"
+                "USB Hub        1  12.55  12.55\n\n"
+                "Subtotal: 110.21\n"
+                "Tax: 8.82\n"
+                "Total: 119.03\n"
+                "Currency: USD"
+            ),
+            label_visibility="collapsed",
+        )
+
+        process_button = st.button(
+            "Process Invoice",
+            type="primary",
+            use_container_width=True,
+        )
+
+    # -----------------------------------------------------------------------
+    # Processing
+    # -----------------------------------------------------------------------
+
+    if process_button:
+
+        if not raw_text.strip():
+
+            st.error(
+                "Please enter invoice or receipt text before processing."
+            )
+
+        else:
+
+            try:
+
+                with st.spinner(
+                    "Submitting invoice to the extraction pipeline..."
+                ):
+
+                    job_id = submit_extraction(
+                        raw_text
+                    )
+
+                st.session_state[
+                    "last_job_id"
+                ] = job_id
+
+                st.session_state[
+                    "last_source_text"
+                ] = raw_text
+
+                st.success(
+                    f"Job submitted successfully: {job_id}"
+                )
+
+                with st.spinner(
+                    "Waiting for the worker to complete extraction..."
+                ):
+
+                    job = poll_job(
+                        job_id
+                    )
+
+                st.session_state[
+                    "last_job"
+                ] = job
+
+            except Exception as exc:
+
+                st.error(
+                    f"Extraction request failed: {exc}"
+                )
+
+    # -----------------------------------------------------------------------
+    # Existing result
+    # -----------------------------------------------------------------------
+
+    job = st.session_state.get(
+        "last_job"
+    )
+
+    source_text = st.session_state.get(
+        "last_source_text",
+        raw_text,
+    )
+
+    if job:
+
+        status = job.get(
+            "status",
+            "unknown",
+        )
+
+        if status == "complete":
+
+            result = job.get(
+                "result"
+            ) or {}
+
+            invoice = get_invoice_from_result(
+                result
+            )
+
+            success = result.get(
+                "success",
+                False,
+            )
+
+            if not success:
+
+                st.error(
+                    safe_value(
+                        result.get("error"),
+                        "Extraction failed.",
+                    )
+                )
+
+            # ---------------------------------------------------------------
+            # Result heading
+            # ---------------------------------------------------------------
+
+            st.markdown(
+                '<div class="section-heading">Extraction result</div>',
+                unsafe_allow_html=True,
+            )
+
+            source_col, result_col = st.columns(
+                [0.9, 1.1],
+                gap="large",
+            )
+
+            # ---------------------------------------------------------------
+            # Source panel
+            # ---------------------------------------------------------------
+
+            with source_col:
+
+                st.markdown(
+                    """
+                    <div class="card">
+                        <div class="card-title">Source document</div>
+                        <div class="card-subtitle">
+                            Raw text submitted to the API.
+                        </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                st.text_area(
+                    "Source",
+                    value=source_text,
+                    height=470,
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+
+                st.markdown(
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # ---------------------------------------------------------------
+            # Structured result
+            # ---------------------------------------------------------------
+
+            with result_col:
+
+                st.markdown(
+                    """
+                    <div class="card">
+                        <div class="card-title">Structured data</div>
+                        <div class="card-subtitle">
+                            Validated invoice fields returned by the pipeline.
+                        </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                invoice_col1, invoice_col2 = st.columns(2)
+
+                with invoice_col1:
+
+                    render_field(
+                        "Vendor",
+                        invoice.get(
+                            "vendor_name"
+                        ),
+                    )
+
+                    render_field(
+                        "Invoice Number",
+                        invoice.get(
+                            "invoice_number"
+                        ),
+                    )
+
+                with invoice_col2:
+
+                    render_field(
+                        "Invoice Date",
+                        invoice.get(
+                            "invoice_date"
+                        ),
+                    )
+
+                    render_field(
+                        "Currency",
+                        invoice.get(
+                            "currency"
+                        ),
+                    )
+
+                # -----------------------------------------------------------
+                # Line items
+                # -----------------------------------------------------------
+
+                st.markdown(
+                    '<div class="field-label" style="margin-top:0.9rem;">'
+                    "LINE ITEMS"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+                line_items = invoice.get(
+                    "line_items",
+                    [],
+                )
+
+                if line_items:
+
+                    line_rows = []
+
+                    currency = invoice.get(
+                        "currency"
+                    )
+
+                    for item in line_items:
+
+                        line_rows.append(
+                            {
+                                "Description": safe_value(
+                                    item.get("description")
+                                ),
+                                "Qty": item.get(
+                                    "quantity",
+                                    "Not detected",
+                                ),
+                                "Unit Price": format_currency(
+                                    item.get("unit_price"),
+                                    currency,
+                                ),
+                                "Total": format_currency(
+                                    item.get("total"),
+                                    currency,
+                                ),
+                            }
+                        )
+
+                    line_df = pd.DataFrame(
+                        line_rows
+                    )
+
+                    st.dataframe(
+                        line_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                else:
+
+                    st.info(
+                        "No line items detected."
+                    )
+
+                # -----------------------------------------------------------
+                # Totals
+                # -----------------------------------------------------------
+
+                currency = invoice.get(
+                    "currency"
+                )
+
+                subtotal = invoice.get(
+                    "subtotal"
+                )
+
+                tax_amount = invoice.get(
+                    "tax_amount"
+                )
+
+                total_amount = invoice.get(
+                    "total_amount"
+                )
+
+                total_col1, total_col2, total_col3 = st.columns(3)
+
+                with total_col1:
+                    render_field(
+                        "Subtotal",
+                        format_currency(
+                            subtotal,
+                            currency,
+                        ),
+                    )
+
+                with total_col2:
+                    render_field(
+                        "Tax",
+                        format_currency(
+                            tax_amount,
+                            currency,
+                        ),
+                    )
+
+                with total_col3:
+                    render_field(
+                        "Total",
+                        format_currency(
+                            total_amount,
+                            currency,
+                        ),
+                    )
+
+                st.markdown(
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+            # ----------------------------------------------------------------
+            # Pipeline metadata
+            # ----------------------------------------------------------------
+
+            st.markdown(
+                '<div class="section-heading">Processing details</div>',
+                unsafe_allow_html=True,
+            )
+
+            model_name = result.get(
+                "model_name",
+                "unknown",
+            )
+
+            fallback_used = result.get(
+                "fallback_used",
+                False,
+            )
+
+            latency = result.get(
+                "latency_seconds"
+            )
+
+            estimated_cost = result.get(
+                "estimated_cost_usd"
+            )
+
+            st.markdown(
+                f"""
+                <div class="meta-row">
+
+                    <div class="meta-item">
+                        <div class="field-label">MODEL</div>
+                        <div class="field-value">
+                            {safe_value(model_name, "Unknown")}
+                        </div>
+                    </div>
+
+                    <div class="meta-item">
+                        <div class="field-label">LATENCY</div>
+                        <div class="field-value">
+                            {format_latency(latency)}
+                        </div>
+                    </div>
+
+                    <div class="meta-item">
+                        <div class="field-label">ESTIMATED COST</div>
+                        <div class="field-value">
+                            {format_cost(estimated_cost)}
+                        </div>
+                    </div>
+
+                    <div class="meta-item">
+                        <div class="field-label">FALLBACK</div>
+                        <div class="field-value">
+                            {"Yes — Groq" if fallback_used else "No"}
+                        </div>
+                    </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # ----------------------------------------------------------------
+            # Pipeline
+            # ----------------------------------------------------------------
+
+            st.markdown(
+                '<div class="section-heading">Processing pipeline</div>',
+                unsafe_allow_html=True,
+            )
+
+            fallback_text = (
+                "Fallback activated — Groq"
+                if fallback_used
+                else "Primary model completed extraction"
+            )
+
+            st.markdown(
+                f"""
+                <div class="card">
+                    <div class="pipeline">
+
+                        <div class="checklist-row">
+                            <span class="check-yes">✓</span>
+                            Invoice text submitted to FastAPI
+                        </div>
+
+                        <div class="checklist-row">
+                            <span class="check-yes">✓</span>
+                            Job queued through arq
+                        </div>
+
+                        <div class="checklist-row">
+                            <span class="check-yes">✓</span>
+                            Worker processed extraction request
+                        </div>
+
+                        <div class="checklist-row">
+                            <span class="check-yes">✓</span>
+                            {fallback_text}
+                        </div>
+
+                        <div class="checklist-row">
+                            <span class="check-yes">✓</span>
+                            Pydantic schema validation completed
+                        </div>
+
+                        <div class="checklist-row">
+                            <span class="check-yes">✓</span>
+                            Result persisted to PostgreSQL
+                        </div>
+
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # ----------------------------------------------------------------
+            # Raw JSON
+            # ----------------------------------------------------------------
+
+            with st.expander(
+                "View raw API result"
+            ):
+                st.json(
+                    result
+                )
+
+        elif status == "timeout":
+
+            st.warning(
+                "The job did not complete within the UI polling window. "
+                "The worker may still be processing it."
+            )
+
+            job_id = job.get(
+                "job_id"
+            )
+
+            if job_id:
+                st.caption(
+                    f"Job ID: {job_id}"
+                )
+
+        else:
+
+            st.info(
+                f"Job status: {status}"
+            )
+
+
+# ===========================================================================
 # BENCHMARK
-# ============================================================
+# ===========================================================================
+
 elif page == "Benchmark":
-    st.markdown('<div class="page-title">Model Benchmark</div>', unsafe_allow_html=True)
+
+    render_page_header(
+        "Evaluation",
+        "Model benchmark",
+        "Compare the prompted LLM baseline with the fine-tuned Qwen model on synthetic and real invoice data.",
+    )
+
+    # -----------------------------------------------------------------------
+    # Evaluation setup
+    # -----------------------------------------------------------------------
+
     st.markdown(
-        '<div class="page-subtitle">Compare extraction quality, latency, and cost across models.</div>',
+        """
+        <div class="card">
+            <div class="card-title">Evaluation setup</div>
+            <div class="card-subtitle">
+                The benchmark separates synthetic evaluation from the private
+                real-receipt holdout.
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="panel"><div class="panel-title">BENCHMARK STATUS</div>', unsafe_allow_html=True)
+    setup_col1, setup_col2, setup_col3 = st.columns(3)
+
+    with setup_col1:
+        render_metric(
+            "Synthetic Test",
+            "28",
+            "Synthetic examples",
+        )
+
+    with setup_col2:
+        render_metric(
+            "Real Holdout",
+            "13",
+            "Private Malaysian receipts",
+        )
+
+    with setup_col3:
+        render_metric(
+            "Fine-tuning Data",
+            "205",
+            "Synthetic training examples",
+        )
+
+    # -----------------------------------------------------------------------
+    # Summary table
+    # -----------------------------------------------------------------------
+
     st.markdown(
-        '<div class="checklist-row"><span class="status-dot status-ok"></span>Synthetic dataset — Ready</div>'
-        '<div class="checklist-row"><span class="status-dot status-ok"></span>Prompted LLM baseline (Groq) — Ready</div>'
-        '<div class="checklist-row"><span class="status-dot status-down"></span>Fine-tuned model (Qwen2.5-1.5B LoRA) — Training required</div>',
+        '<div class="section-heading">Benchmark results</div>',
         unsafe_allow_html=True,
     )
+
+    display_df = BENCHMARK_DF.copy()
+
+    for column in [
+        "Valid JSON",
+        "Field Accuracy",
+        "Item Recall",
+        "Item Precision",
+        "Complete Item",
+    ]:
+        display_df[column] = display_df[column].map(
+            lambda value: f"{value:.2f}%"
+        )
+
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # -----------------------------------------------------------------------
+    # Real holdout comparison
+    # -----------------------------------------------------------------------
+
     st.markdown(
-        '<div style="margin-top:0.9rem;color:#6B7280;font-size:0.88rem;">'
-        'Accuracy, latency, and cost numbers for both models will appear here once the LoRA training '
-        'run and benchmark script have completed — not filled in early to avoid showing placeholder '
-        'numbers as if they were real results.</div>',
+        '<div class="section-heading">Real holdout comparison</div>',
         unsafe_allow_html=True,
     )
-    st.markdown('</div>', unsafe_allow_html=True)
+
+    real_df = BENCHMARK_DF[
+        BENCHMARK_DF["Dataset"] == "Real"
+    ].copy()
+
+    metric_options = [
+        "Field Accuracy",
+        "Item Recall",
+        "Item Precision",
+        "Complete Item",
+        "Valid JSON",
+    ]
+
+    selected_metric = st.selectbox(
+        "Metric",
+        metric_options,
+    )
+
+    chart_df = real_df[
+        ["Model", selected_metric]
+    ].set_index("Model")
+
+    st.bar_chart(
+        chart_df,
+        height=340,
+    )
+
+    # -----------------------------------------------------------------------
+    # LoRA improvement
+    # -----------------------------------------------------------------------
+
+    lora_real = BENCHMARK_DF[
+        (BENCHMARK_DF["Model"] == "LoRA Qwen v3")
+        & (BENCHMARK_DF["Dataset"] == "Real")
+    ].iloc[0]
+
+    base_real = BENCHMARK_DF[
+        (BENCHMARK_DF["Model"] == "Base Qwen")
+        & (BENCHMARK_DF["Dataset"] == "Real")
+    ].iloc[0]
+
+    field_improvement = (
+        lora_real["Field Accuracy"]
+        - base_real["Field Accuracy"]
+    )
+
+    complete_item_improvement = (
+        lora_real["Complete Item"]
+        - base_real["Complete Item"]
+    )
+
+    st.markdown(
+        '<div class="section-heading">Fine-tuning effect</div>',
+        unsafe_allow_html=True,
+    )
+
+    improve_col1, improve_col2 = st.columns(2)
+
+    with improve_col1:
+
+        render_metric(
+            "Field Accuracy",
+            f"{lora_real['Field Accuracy']:.2f}%",
+            (
+                f"Base Qwen: {base_real['Field Accuracy']:.2f}% "
+                f"→ +{field_improvement:.2f} percentage points"
+            ),
+        )
+
+    with improve_col2:
+
+        render_metric(
+            "Complete Item",
+            f"{lora_real['Complete Item']:.2f}%",
+            (
+                f"Base Qwen: {base_real['Complete Item']:.2f}% "
+                f"→ +{complete_item_improvement:.2f} percentage points"
+            ),
+        )
+
+    # -----------------------------------------------------------------------
+    # Findings
+    # -----------------------------------------------------------------------
+
+    st.markdown(
+        '<div class="section-heading">Key findings</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="finding-box">
+            <div class="finding-title">
+                LoRA improves the base Qwen model
+            </div>
+            <div class="finding-text">
+                On the real holdout, LoRA Qwen v3 improves field accuracy
+                from 46.15% to 54.95%, an 8.80 percentage-point increase.
+                Complete-item accuracy increases from 24.39% to 29.27%.
+            </div>
+        </div>
+
+        <div class="finding-box">
+            <div class="finding-title">
+                The real-world gap remains significant
+            </div>
+            <div class="finding-text">
+                The fine-tuned Qwen model remains below the Groq baseline on
+                the real holdout. This indicates that the synthetic training
+                data does not fully capture the variability of real receipts.
+            </div>
+        </div>
+
+        <div class="finding-box">
+            <div class="finding-title">
+                Synthetic and real results should not be treated as one dataset
+            </div>
+            <div class="finding-text">
+                The Groq synthetic score is reported separately from the real
+                holdout results. The real holdout is the more relevant measure
+                for testing generalization to unseen receipt formats.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # -----------------------------------------------------------------------
+    # Detailed metric comparison
+    # -----------------------------------------------------------------------
+
+    st.markdown(
+        '<div class="section-heading">Detailed real-holdout metrics</div>',
+        unsafe_allow_html=True,
+    )
+
+    detailed_df = real_df[
+        [
+            "Model",
+            "Valid JSON",
+            "Field Accuracy",
+            "Item Recall",
+            "Item Precision",
+            "Complete Item",
+        ]
+    ].copy()
+
+    st.dataframe(
+        detailed_df.style.format(
+            {
+                "Valid JSON": "{:.2f}%",
+                "Field Accuracy": "{:.2f}%",
+                "Item Recall": "{:.2f}%",
+                "Item Precision": "{:.2f}%",
+                "Complete Item": "{:.2f}%",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # -----------------------------------------------------------------------
+    # Dataset notes
+    # -----------------------------------------------------------------------
+
+    with st.expander(
+        "Evaluation notes"
+    ):
+
+        st.markdown(
+            """
+            **Synthetic evaluation**
+
+            - 28 synthetic test examples
+            - Groq valid JSON: 100%
+            - Groq field accuracy: 89.80%
+            - Line-item recall: 94.92%
+            - Line-item precision: 100%
+            - Complete-item accuracy: 83.05%
+
+            **Real holdout**
+
+            - 13 private Malaysian receipts
+            - Groq valid JSON: 100%
+            - LoRA Qwen v3 valid JSON: 92.31%
+            - Base Qwen valid JSON: 92.31%
+
+            **Important interpretation**
+
+            The fine-tuning experiment demonstrates measurable improvement
+            over the base Qwen model, while also showing a substantial
+            synthetic-to-real generalization gap.
+            """
+        )
