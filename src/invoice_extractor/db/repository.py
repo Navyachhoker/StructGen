@@ -93,6 +93,7 @@ async def list_recent_extractions(pool: asyncpg.Pool, limit: int = 20) -> list[d
             invoice_json ->> 'invoice_number' AS invoice_number,
             invoice_json ->> 'invoice_date'   AS invoice_date,
             invoice_json ->> 'total_amount'   AS total_amount,
+            invoice_json ->> 'currency'       AS currency,
             latency_seconds,
             estimated_cost_usd,
             created_at

@@ -1,0 +1,17 @@
+TechMart Electronics
+
+Invoice Number: INV-2024-0157
+Invoice Date: 2026-03-12
+
+Bill To: Horizon Consulting LLC
+
+Description              Qty    Unit Price    Total
+Laptop Stand               1        45.02       45.02
+Wireless Mouse              2        26.32       52.64
+USB-C Hub                   1        34.50       34.50
+HDMI Cable (2m)              3         8.75       26.25
+
+Subtotal: 158.41
+Tax: 12.67
+Total: 171.08
+Currency: USD

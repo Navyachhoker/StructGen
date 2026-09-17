@@ -23,13 +23,24 @@ class ExtractRequest(BaseModel):
 
 
 class ExtractResponse(BaseModel):
-    """Body returned by POST /extract."""
+    """Body returned by POST /extract.
+
+    `model_name` and `fallback_used` are populated by worker.py's
+    extract_invoice_task (see the result_payload dict there) and read
+    by the Streamlit UI to show which model actually served a given
+    job. Without declaring them here, Pydantic silently drops them
+    when /jobs/{job_id} reconstructs this model from the arq job
+    result, which is why the UI would otherwise always show
+    "unknown" / "No fallback".
+    """
 
     success: bool
     invoice: Optional[ExtractedInvoice] = None
     error: Optional[str] = None
     latency_seconds: Optional[float] = None
     estimated_cost_usd: Optional[float] = None
+    model_name: Optional[str] = None
+    fallback_used: bool = False
 
 
 class StatsResponse(BaseModel):

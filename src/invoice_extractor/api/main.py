@@ -23,26 +23,17 @@ from invoice_extractor.api.models import (
     InvoiceListItem,
 )
 from invoice_extractor.config import settings
-from invoice_extractor.clients.groq_client import GroqClient
 from invoice_extractor.db.connection import get_pool, close_pool
 from invoice_extractor.db.repository import get_stats, list_recent_extractions
-from invoice_extractor.worker import extract_invoice_task
+from invoice_extractor.worker import (
+    extract_invoice_task,
+    startup as _worker_on_startup,
+    shutdown as _worker_on_shutdown,
+)
 
 _redis_pool = None
 _arq_worker = None
 _arq_worker_task = None
-
-
-async def _in_process_worker_startup(ctx: dict) -> None:
-    # Reuses the Postgres pool the API lifespan already opened, rather
-    # than opening a second one in the same process.
-    ctx["groq_client"] = GroqClient()
-    ctx["db_pool"] = await get_pool()
-
-
-async def _in_process_worker_shutdown(ctx: dict) -> None:
-    # No-op: pools are closed once below, by the API lifespan, not per-worker.
-    pass
 
 
 @asynccontextmanager
@@ -55,8 +46,8 @@ async def lifespan(app: FastAPI):
     _arq_worker = Worker(
         functions=[extract_invoice_task],
         redis_pool=_redis_pool,
-        on_startup=_in_process_worker_startup,
-        on_shutdown=_in_process_worker_shutdown,
+        on_startup=_worker_on_startup,
+        on_shutdown=_worker_on_shutdown,
         # Don't let arq install its own SIGINT/SIGTERM handlers — uvicorn
         # already owns process signal handling in this combined process.
         handle_signals=False,
@@ -77,7 +68,7 @@ async def lifespan(app: FastAPI):
         # doesn't exist on Windows. Harmless locally — the worker task
         # is already cancelled above. Not an issue on Render's Linux env.
         pass
-    await _redis_pool.close()
+    await _redis_pool.aclose()
     await close_pool()
 
 
@@ -115,6 +106,18 @@ async def job_status(job_id: str):
         return JobStatusResponse(job_id=job_id, status=status.value)
 
     job_result = await job.result_info()
+
+    if not job_result.success:
+        # The task itself raised (a bug in extract_invoice_task, not a
+        # normal extraction failure — those are reported via
+        # ExtractResponse.success=False instead). job_result.result is
+        # the raised exception object here, not a result dict, so it
+        # can't be **-unpacked into ExtractResponse.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Worker task raised an exception: {job_result.result!r}",
+        )
+
     return JobStatusResponse(
         job_id=job_id,
         status="complete",

@@ -29,6 +29,8 @@ dev = [
 demo = [
     "streamlit>=1.38.0",   # NEW — isolated in its own extra, not core deps
     "requests>=2.32.0",    # NEW
+    "altair>=5.0.0",       # NEW — used directly for chart tooltips/axes,
+                           # not just relied on transitively via streamlit
 ]
 
 [tool.pytest.ini_options]

@@ -16,6 +16,7 @@ import os
 from datetime import datetime
 from typing import Any
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -434,6 +435,41 @@ st.markdown(
         margin: 0.8rem 0;
     }
 
+    .improvement-row {
+        display: flex;
+        align-items: baseline;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin-top: 0.5rem;
+    }
+
+    .improvement-before {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: #98a2b3;
+    }
+
+    .improvement-arrow {
+        font-size: 1.3rem;
+        color: #98a2b3;
+    }
+
+    .improvement-after {
+        font-size: 2rem;
+        font-weight: 750;
+        color: #172033;
+    }
+
+    .improvement-delta {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 0.25rem 0.7rem;
+        font-size: 0.78rem;
+        font-weight: 700;
+        background: #ecfdf3;
+        color: #027a48;
+    }
+
     .finding-title {
         font-weight: 700;
         color: #172033;
@@ -477,6 +513,44 @@ st.markdown(
         border: 1px solid #e5e7eb;
         border-radius: 10px;
         overflow: hidden;
+    }
+
+    /* Custom HTML table for Recent Extractions — st.dataframe can't render
+       the status-badge HTML inside a cell, so this table is built by hand. */
+    .recent-table-wrap {
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        overflow: hidden;
+        margin-bottom: 1rem;
+    }
+
+    .recent-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+    }
+
+    .recent-table th {
+        text-align: left;
+        color: #667085;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 0.7rem 0.9rem;
+        background: #f8fafc;
+        border-bottom: 1px solid #e5e7eb;
+    }
+
+    .recent-table td {
+        color: #172033;
+        padding: 0.65rem 0.9rem;
+        border-bottom: 1px solid #f2f4f7;
+    }
+
+    .recent-table tr:last-child td {
+        border-bottom: none;
     }
 
     /* ------------------------------------------------------------------ */
@@ -583,6 +657,39 @@ def render_metric(
     )
 
 
+def render_improvement(
+    label: str,
+    before_value: float,
+    after_value: float,
+    before_label: str = "Base Qwen",
+    after_label: str = "LoRA Qwen v3",
+) -> None:
+    """Render a prominent before → after comparison with a delta badge,
+    so the fine-tuning effect reads in seconds instead of being buried
+    in a metric-card footnote."""
+    delta = after_value - before_value
+
+    st.markdown(
+        f"""
+        <div class="card">
+            <div class="card-title">{label}</div>
+            <div class="card-subtitle">
+                {before_label} → {after_label}
+            </div>
+            <div class="improvement-row">
+                <div class="improvement-before">{before_value:.2f}%</div>
+                <div class="improvement-arrow">→</div>
+                <div class="improvement-after">{after_value:.2f}%</div>
+                <span class="improvement-delta">
+                    +{delta:.2f} percentage points
+                </span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_field(label: str, value: Any) -> None:
     """Render a single extracted field."""
     st.markdown(
@@ -636,6 +743,66 @@ def get_invoice_from_result(result: dict) -> dict:
         return invoice
 
     return {}
+
+
+def derive_record_status(item: dict) -> str:
+    """Derive a display status for a persisted extraction_requests row.
+
+    The table has no `status` column (see schema.sql) — it stores a
+    `success` boolean instead, set once by the worker after the job
+    finishes. Every row returned by list_recent_extractions() is
+    therefore always a completed job: there's no "processing" row in
+    this table, because in-flight jobs haven't been inserted yet.
+    `item.get("status")` used to silently default to "unknown" here
+    because that key never existed on these rows in the first place.
+    """
+    if item.get("success") is True:
+        return "success"
+    if item.get("success") is False:
+        return "failed"
+    return "unknown"
+
+
+def render_recent_table(rows: list[dict]) -> None:
+    """Render the Recent Extractions table as hand-built HTML so the
+    Status column can show a real colored badge (st.dataframe cells
+    can't render HTML, only plain text)."""
+    body_rows = "".join(
+        f"""
+        <tr>
+            <td>{row['Invoice']}</td>
+            <td>{row['Vendor']}</td>
+            <td>{row['Total']}</td>
+            <td>{render_status(row['StatusKey'])}</td>
+            <td>{row['Model']}</td>
+            <td>{row['Latency']}</td>
+        </tr>
+        """
+        for row in rows
+    )
+
+    st.markdown(
+        f"""
+        <div class="recent-table-wrap">
+            <table class="recent-table">
+                <thead>
+                    <tr>
+                        <th>Invoice</th>
+                        <th>Vendor</th>
+                        <th>Total</th>
+                        <th>Status</th>
+                        <th>Model</th>
+                        <th>Latency</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {body_rows}
+                </tbody>
+            </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -810,7 +977,7 @@ if page == "Dashboard":
         if st.button(
             "Process Invoice",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state["page_override"] = "Extract"
             st.rerun()
@@ -869,10 +1036,7 @@ if page == "Dashboard":
                 "currency"
             )
 
-            status = item.get(
-                "status",
-                "unknown",
-            )
+            status_key = derive_record_status(item)
 
             latency = item.get(
                 "latency_seconds"
@@ -893,19 +1057,13 @@ if page == "Dashboard":
                         total_amount,
                         currency,
                     ),
-                    "Status": str(status).upper(),
+                    "StatusKey": status_key,
                     "Model": model_name,
                     "Latency": format_latency(latency),
                 }
             )
 
-        recent_df = pd.DataFrame(table_rows)
-
-        st.dataframe(
-            recent_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        render_recent_table(table_rows)
 
     # -----------------------------------------------------------------------
     # Latency chart
@@ -913,9 +1071,12 @@ if page == "Dashboard":
 
     if recent:
 
+        # Built in chronological order (oldest first) so "Job 1" reads
+        # left-to-right the way a trend should, even though the table
+        # above shows newest-first (ORDER BY created_at DESC).
         latency_rows = []
 
-        for item in recent:
+        for item in reversed(recent):
             latency = item.get("latency_seconds")
 
             if latency is None:
@@ -939,13 +1100,37 @@ if page == "Dashboard":
             )
 
             latency_df = pd.DataFrame(latency_rows)
+            latency_df["Job"] = [
+                f"Job {i + 1}" for i in range(len(latency_df))
+            ]
 
-            st.line_chart(
-                latency_df.set_index("Invoice")[
-                    ["Latency (s)"]
-                ],
-                height=280,
+            latency_chart = (
+                alt.Chart(latency_df)
+                .mark_line(point=True, color="#4f46e5")
+                .encode(
+                    x=alt.X(
+                        "Job:N",
+                        sort=None,
+                        title="Extraction order",
+                        axis=alt.Axis(labelAngle=0),
+                    ),
+                    y=alt.Y(
+                        "Latency (s):Q",
+                        title="Latency (seconds)",
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Invoice:N", title="Invoice"),
+                        alt.Tooltip(
+                            "Latency (s):Q",
+                            title="Latency",
+                            format=".1f",
+                        ),
+                    ],
+                )
+                .properties(height=280)
             )
+
+            st.altair_chart(latency_chart, width="stretch")
 
 
 # ===========================================================================
@@ -1007,7 +1192,7 @@ elif page == "Extract":
         process_button = st.button(
             "Process Invoice",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
     # -----------------------------------------------------------------------
@@ -1046,13 +1231,38 @@ elif page == "Extract":
                     f"Job submitted successfully: {job_id}"
                 )
 
-                with st.spinner(
-                    "Waiting for the worker to complete extraction..."
-                ):
+                # Live status line: the backend is async (FastAPI + arq),
+                # so the UI should say so explicitly rather than leaving
+                # the person staring at a generic spinner wondering if
+                # anything is happening.
+                status_placeholder = st.empty()
 
-                    job = poll_job(
-                        job_id
+                def _show_live_status(body: dict) -> None:
+                    live_status = body.get("status", "unknown")
+                    status_placeholder.markdown(
+                        f"""
+                        <div class="card" style="margin-bottom:0;">
+                            <div class="card-title">Processing invoice...</div>
+                            <div class="card-subtitle" style="margin-bottom:0;">
+                                Job ID: {job_id}
+                            </div>
+                            <div style="margin-top:0.5rem;">
+                                {render_status(live_status)}
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
                     )
+
+                job = poll_job(
+                    job_id,
+                    on_update=_show_live_status,
+                )
+
+                status_placeholder.empty()
+
+                if job.get("status") == "complete":
+                    st.success("✓ Extraction completed")
 
                 st.session_state[
                     "last_job"
@@ -1255,7 +1465,7 @@ elif page == "Extract":
 
                     st.dataframe(
                         line_df,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -1549,7 +1759,7 @@ elif page == "Benchmark":
 
     st.dataframe(
         display_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -1581,12 +1791,50 @@ elif page == "Benchmark":
 
     chart_df = real_df[
         ["Model", selected_metric]
-    ].set_index("Model")
+    ].copy()
 
-    st.bar_chart(
-        chart_df,
-        height=340,
+    model_order = [
+        "Groq",
+        "LoRA Qwen v3",
+        "Base Qwen",
+    ]
+
+    comparison_chart = (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            y=alt.Y(
+                "Model:N",
+                sort=model_order,
+                title=None,
+            ),
+            x=alt.X(
+                f"{selected_metric}:Q",
+                title=f"{selected_metric} (%)",
+                scale=alt.Scale(domain=[0, 100]),
+            ),
+            color=alt.Color(
+                "Model:N",
+                sort=model_order,
+                legend=None,
+                scale=alt.Scale(
+                    domain=model_order,
+                    range=["#4f46e5", "#039855", "#98a2b3"],
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("Model:N"),
+                alt.Tooltip(
+                    f"{selected_metric}:Q",
+                    format=".2f",
+                    title=selected_metric,
+                ),
+            ],
+        )
+        .properties(height=220)
     )
+
+    st.altair_chart(comparison_chart, width="stretch")
 
     # -----------------------------------------------------------------------
     # LoRA improvement
@@ -1602,16 +1850,6 @@ elif page == "Benchmark":
         & (BENCHMARK_DF["Dataset"] == "Real")
     ].iloc[0]
 
-    field_improvement = (
-        lora_real["Field Accuracy"]
-        - base_real["Field Accuracy"]
-    )
-
-    complete_item_improvement = (
-        lora_real["Complete Item"]
-        - base_real["Complete Item"]
-    )
-
     st.markdown(
         '<div class="section-heading">Fine-tuning effect</div>',
         unsafe_allow_html=True,
@@ -1621,24 +1859,18 @@ elif page == "Benchmark":
 
     with improve_col1:
 
-        render_metric(
+        render_improvement(
             "Field Accuracy",
-            f"{lora_real['Field Accuracy']:.2f}%",
-            (
-                f"Base Qwen: {base_real['Field Accuracy']:.2f}% "
-                f"→ +{field_improvement:.2f} percentage points"
-            ),
+            base_real["Field Accuracy"],
+            lora_real["Field Accuracy"],
         )
 
     with improve_col2:
 
-        render_metric(
-            "Complete Item",
-            f"{lora_real['Complete Item']:.2f}%",
-            (
-                f"Base Qwen: {base_real['Complete Item']:.2f}% "
-                f"→ +{complete_item_improvement:.2f} percentage points"
-            ),
+        render_improvement(
+            "Complete Item Accuracy",
+            base_real["Complete Item"],
+            lora_real["Complete Item"],
         )
 
     # -----------------------------------------------------------------------
@@ -1718,7 +1950,7 @@ elif page == "Benchmark":
                 "Complete Item": "{:.2f}%",
             }
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
