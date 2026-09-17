@@ -1,11 +1,13 @@
 """
 arq worker for invoice extraction.
 
-Primary model:
-    Local Qwen2.5-1.5B + LoRA v3
+Local mode:
+    Primary: Qwen2.5-1.5B + LoRA v3
+    Fallback: Groq GPT-OSS-120B
 
-Fallback model:
-    Groq GPT-OSS-120B
+Groq deployment mode:
+    Primary: Groq GPT-OSS-120B
+    Fallback: Groq GPT-OSS-120B
 
 Results are persisted to Postgres after each job.
 """
@@ -26,25 +28,48 @@ _FALLBACK_MODEL_NAME = "openai/gpt-oss-120b"
 
 
 async def startup(ctx: dict) -> None:
-    """Create model clients and database pool once per worker."""
+    """
+    Create model clients and the database pool once per worker.
 
-    local_lora_client = LocalLoRAClient()
+    Local mode:
+        Qwen LoRA → Groq fallback
+
+    Groq mode:
+        Groq directly
+    """
 
     groq_client = GroqClient()
 
-    ctx["router"] = ModelRouter(
-        primary=local_lora_client,
-        fallback=groq_client,
-        primary_name=_PRIMARY_MODEL_NAME,
-        fallback_name=_FALLBACK_MODEL_NAME,
-    )
+    if settings.deployment_mode == "groq":
+        # Public deployment path.
+        #
+        # We deliberately do not create LocalLoRAClient here because
+        # the LoRA inference server runs locally and is not part of
+        # the Render deployment.
+        router = ModelRouter(
+            primary=groq_client,
+            fallback=groq_client,
+            primary_name=settings.groq_model_name,
+            fallback_name=settings.groq_model_name,
+        )
 
+    else:
+        # Local development / benchmarking path.
+        local_lora_client = LocalLoRAClient()
+
+        router = ModelRouter(
+            primary=local_lora_client,
+            fallback=groq_client,
+            primary_name=_PRIMARY_MODEL_NAME,
+            fallback_name=_FALLBACK_MODEL_NAME,
+        )
+
+    ctx["router"] = router
     ctx["db_pool"] = await get_pool()
 
 
 async def shutdown(ctx: dict) -> None:
-    """Close shared resources when the worker shuts down."""
-
+    """Close shared resources when a worker shuts down."""
     await close_pool()
 
 
@@ -54,7 +79,6 @@ async def extract_invoice_task(ctx: dict, raw_text: str) -> dict:
     router = ctx["router"]
 
     result = extract_invoice(raw_text, router)
-
     metadata = router.get_last_metadata()
 
     # Determine which underlying client produced the result.
@@ -66,7 +90,11 @@ async def extract_invoice_task(ctx: dict, raw_text: str) -> dict:
     usage = client.get_last_usage() or {
         "latency_seconds": 0.0,
         "estimated_cost_usd": 0.0,
-        "model_name": metadata.model_used if metadata else _PRIMARY_MODEL_NAME,
+        "model_name": (
+            metadata.model_used
+            if metadata
+            else _PRIMARY_MODEL_NAME
+        ),
     }
 
     invoice_dict = (
@@ -81,8 +109,16 @@ async def extract_invoice_task(ctx: dict, raw_text: str) -> dict:
         "error": result.error,
         "latency_seconds": usage["latency_seconds"],
         "estimated_cost_usd": usage["estimated_cost_usd"],
-        "model_name": metadata.model_used if metadata else _PRIMARY_MODEL_NAME,
-        "fallback_used": metadata.fallback_used if metadata else False,
+        "model_name": (
+            metadata.model_used
+            if metadata
+            else _PRIMARY_MODEL_NAME
+        ),
+        "fallback_used": (
+            metadata.fallback_used
+            if metadata
+            else False
+        ),
     }
 
     job_id = ctx["job_id"]
@@ -90,7 +126,11 @@ async def extract_invoice_task(ctx: dict, raw_text: str) -> dict:
     await insert_extraction_record(
         pool=ctx["db_pool"],
         job_id=job_id,
-        model_name=metadata.model_used if metadata else _PRIMARY_MODEL_NAME,
+        model_name=(
+            metadata.model_used
+            if metadata
+            else _PRIMARY_MODEL_NAME
+        ),
         success=result.success,
         invoice_dict=invoice_dict,
         error=result.error,
