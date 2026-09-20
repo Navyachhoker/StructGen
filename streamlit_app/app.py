@@ -20,7 +20,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from api_client import (
+from streamlit_app.api_client import (
     get_recent_invoices,
     get_stats,
     poll_job,
@@ -766,43 +766,42 @@ def derive_record_status(item: dict) -> str:
 def render_recent_table(rows: list[dict]) -> None:
     """Render the Recent Extractions table as hand-built HTML so the
     Status column can show a real colored badge (st.dataframe cells
-    can't render HTML, only plain text)."""
+    can't render HTML, only plain text).
+
+    Built as ONE flat string with no embedded newlines. A multi-line,
+    indented f-string here is what previously leaked raw </tbody> and
+    </table> tags as visible text: Markdown/CommonMark treats a blank
+    or whitespace-only line inside an unsafe_allow_html=True block as
+    the end of the HTML block, and whatever follows (indented by the
+    surrounding Python code) gets parsed as a code block instead.
+    Joining per-row templates that each start/end with "\\n        "
+    creates exactly that kind of blank line at the seam between rows.
+    """
     body_rows = "".join(
-        f"""
-        <tr>
-            <td>{row['Invoice']}</td>
-            <td>{row['Vendor']}</td>
-            <td>{row['Total']}</td>
-            <td>{render_status(row['StatusKey'])}</td>
-            <td>{row['Model']}</td>
-            <td>{row['Latency']}</td>
-        </tr>
-        """
+        "<tr>"
+        f"<td>{row['Invoice']}</td>"
+        f"<td>{row['Vendor']}</td>"
+        f"<td>{row['Total']}</td>"
+        f"<td>{render_status(row['StatusKey'])}</td>"
+        f"<td>{row['Model']}</td>"
+        f"<td>{row['Latency']}</td>"
+        "</tr>"
         for row in rows
     )
 
-    st.markdown(
-        f"""
-        <div class="recent-table-wrap">
-            <table class="recent-table">
-                <thead>
-                    <tr>
-                        <th>Invoice</th>
-                        <th>Vendor</th>
-                        <th>Total</th>
-                        <th>Status</th>
-                        <th>Model</th>
-                        <th>Latency</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {body_rows}
-                </tbody>
-            </table>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    table_html = (
+        '<div class="recent-table-wrap">'
+        '<table class="recent-table">'
+        "<thead><tr>"
+        "<th>Invoice</th><th>Vendor</th><th>Total</th>"
+        "<th>Status</th><th>Model</th><th>Latency</th>"
+        "</tr></thead>"
+        f"<tbody>{body_rows}</tbody>"
+        "</table>"
+        "</div>"
     )
+
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1556,42 +1555,27 @@ elif page == "Extract":
                 "estimated_cost_usd"
             )
 
-            st.markdown(
-                f"""
-                <div class="meta-row">
-
-                    <div class="meta-item">
-                        <div class="field-label">MODEL</div>
-                        <div class="field-value">
-                            {safe_value(model_name, "Unknown")}
-                        </div>
-                    </div>
-
-                    <div class="meta-item">
-                        <div class="field-label">LATENCY</div>
-                        <div class="field-value">
-                            {format_latency(latency)}
-                        </div>
-                    </div>
-
-                    <div class="meta-item">
-                        <div class="field-label">ESTIMATED COST</div>
-                        <div class="field-value">
-                            {format_cost(estimated_cost)}
-                        </div>
-                    </div>
-
-                    <div class="meta-item">
-                        <div class="field-label">FALLBACK</div>
-                        <div class="field-value">
-                            {"Yes — Groq" if fallback_used else "No"}
-                        </div>
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
+            meta_html = (
+                '<div class="meta-row">'
+                '<div class="meta-item">'
+                '<div class="field-label">MODEL</div>'
+                f'<div class="field-value">{safe_value(model_name, "Unknown")}</div>'
+                "</div>"
+                '<div class="meta-item">'
+                '<div class="field-label">LATENCY</div>'
+                f'<div class="field-value">{format_latency(latency)}</div>'
+                "</div>"
+                '<div class="meta-item">'
+                '<div class="field-label">ESTIMATED COST</div>'
+                f'<div class="field-value">{format_cost(estimated_cost)}</div>'
+                "</div>"
+                '<div class="meta-item">'
+                '<div class="field-label">FALLBACK</div>'
+                f'<div class="field-value">{"Yes — Groq" if fallback_used else "No"}</div>'
+                "</div>"
+                "</div>"
             )
+            st.markdown(meta_html, unsafe_allow_html=True)
 
             # ----------------------------------------------------------------
             # Pipeline
@@ -1608,46 +1592,26 @@ elif page == "Extract":
                 else "Primary model completed extraction"
             )
 
-            st.markdown(
-                f"""
-                <div class="card">
-                    <div class="pipeline">
-
-                        <div class="checklist-row">
-                            <span class="check-yes">✓</span>
-                            Invoice text submitted to FastAPI
-                        </div>
-
-                        <div class="checklist-row">
-                            <span class="check-yes">✓</span>
-                            Job queued through arq
-                        </div>
-
-                        <div class="checklist-row">
-                            <span class="check-yes">✓</span>
-                            Worker processed extraction request
-                        </div>
-
-                        <div class="checklist-row">
-                            <span class="check-yes">✓</span>
-                            {fallback_text}
-                        </div>
-
-                        <div class="checklist-row">
-                            <span class="check-yes">✓</span>
-                            Pydantic schema validation completed
-                        </div>
-
-                        <div class="checklist-row">
-                            <span class="check-yes">✓</span>
-                            Result persisted to PostgreSQL
-                        </div>
-
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+            checklist_rows = "".join(
+                '<div class="checklist-row">'
+                '<span class="check-yes">\u2713</span>'
+                f"{step_text}"
+                "</div>"
+                for step_text in (
+                    "Invoice text submitted to FastAPI",
+                    "Job queued through arq",
+                    "Worker processed extraction request",
+                    fallback_text,
+                    "Pydantic schema validation completed",
+                    "Result persisted to PostgreSQL",
+                )
             )
+            pipeline_html = (
+                '<div class="card">'
+                f'<div class="pipeline">{checklist_rows}</div>'
+                "</div>"
+            )
+            st.markdown(pipeline_html, unsafe_allow_html=True)
 
             # ----------------------------------------------------------------
             # Raw JSON
@@ -1882,43 +1846,36 @@ elif page == "Benchmark":
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        """
-        <div class="finding-box">
-            <div class="finding-title">
-                LoRA improves the base Qwen model
-            </div>
-            <div class="finding-text">
-                On the real holdout, LoRA Qwen v3 improves field accuracy
-                from 46.15% to 54.95%, an 8.80 percentage-point increase.
-                Complete-item accuracy increases from 24.39% to 29.27%.
-            </div>
-        </div>
-
-        <div class="finding-box">
-            <div class="finding-title">
-                The real-world gap remains significant
-            </div>
-            <div class="finding-text">
-                The fine-tuned Qwen model remains below the Groq baseline on
-                the real holdout. This indicates that the synthetic training
-                data does not fully capture the variability of real receipts.
-            </div>
-        </div>
-
-        <div class="finding-box">
-            <div class="finding-title">
-                Synthetic and real results should not be treated as one dataset
-            </div>
-            <div class="finding-text">
-                The Groq synthetic score is reported separately from the real
-                holdout results. The real holdout is the more relevant measure
-                for testing generalization to unseen receipt formats.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    findings_html = "".join(
+        '<div class="finding-box">'
+        f'<div class="finding-title">{title}</div>'
+        f'<div class="finding-text">{text}</div>'
+        "</div>"
+        for title, text in (
+            (
+                "LoRA improves the base Qwen model",
+                "On the real holdout, LoRA Qwen v3 improves field accuracy "
+                "from 46.15% to 54.95%, an 8.80 percentage-point increase. "
+                "Complete-item accuracy increases from 24.39% to 29.27%.",
+            ),
+            (
+                "The real-world gap remains significant",
+                "The fine-tuned Qwen model remains below the Groq baseline "
+                "on the real holdout. This indicates that the synthetic "
+                "training data does not fully capture the variability of "
+                "real receipts.",
+            ),
+            (
+                "Synthetic and real results should not be treated as one "
+                "dataset",
+                "The Groq synthetic score is reported separately from the "
+                "real holdout results. The real holdout is the more "
+                "relevant measure for testing generalization to unseen "
+                "receipt formats.",
+            ),
+        )
     )
+    st.markdown(findings_html, unsafe_allow_html=True)
 
     # -----------------------------------------------------------------------
     # Detailed metric comparison
