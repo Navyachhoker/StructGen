@@ -20,7 +20,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from streamlit_app.api_client import (
+from api_client import (
     get_recent_invoices,
     get_stats,
     poll_job,
