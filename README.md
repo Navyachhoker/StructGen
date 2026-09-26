@@ -10,7 +10,7 @@ A benchmarking system that pits a large prompted LLM (Groq `gpt-oss-120b`) again
 ![Extraction Example](docs/images/image-1.png)
 *Raw receipt text extracted into schema-validated structured JSON.*
 
-![Benchmark Results](docs/images/image_benchmark.png)
+![Benchmark Results](docs/images/image_bechmark.png)
 *Field accuracy comparison between the Groq baseline and the LoRA fine-tuned model.*
 
 
