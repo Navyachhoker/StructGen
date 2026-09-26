@@ -2,9 +2,17 @@
 
 A benchmarking system that pits a large prompted LLM (Groq `gpt-oss-120b`) against a LoRA fine-tuned small language model (`Qwen2.5-1.5B-Instruct`) for schema-validated, structured JSON extraction from unstructured invoice and receipt text.
 
-![alt text](image.png)
-![alt text](image-1.png)
-![alt text](image-2.png)
+## Demo
+
+![StructGen Dashboard](docs/images/image.png)
+*The Streamlit dashboard where a user submits invoice/receipt text for extraction.*
+
+![Extraction Example](docs/images/image-1.png)
+*Raw receipt text extracted into schema-validated structured JSON.*
+
+![Benchmark Results](docs/images/image_benchmark.png)
+*Field accuracy comparison between the Groq baseline and the LoRA fine-tuned model.*
+
 
 **Live app:** https://structgen.onrender.com
 **Repo:** [Navyachhoker/StructGen](https://github.com/Navyachhoker/StructGen)
